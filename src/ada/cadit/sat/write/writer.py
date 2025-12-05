@@ -5,10 +5,13 @@ from dataclasses import dataclass, field
 from itertools import chain
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from ada.base.types import GeomRepr
 from ada.cadit.sat.write import sat_entities as se
 from ada.cadit.sat.write.sat_entities import SATEntity
 from ada.cadit.sat.write.utils import IDGenerator
+from ada.cadit.sat.write.write_beam import beam_to_sat_entities
 from ada.cadit.sat.write.write_plate import plate_to_sat_entities
 
 if TYPE_CHECKING:
@@ -20,22 +23,96 @@ HEADER_STR = """2000 0 1 0
 """
 
 
+from ada import Beam
+
 def part_to_sat_writer(part: Part | Assembly) -> SatWriter:
+    from ada import Beam
+    import numpy as np
+
+    sw = SatWriter(part)
+    id_gen = sw.id_generator
+    bbox = sw.bbox
+
+    # ---------------------------------------------------------
+    # 1) Create core topological ACIS structure
+    # ---------------------------------------------------------
+
+    # Body
+    body_id = id_gen.next_id()
+    body = se.Body(body_id, None, bbox)
+
+    # Lump
+    lump_id = id_gen.next_id()
+    lump = se.Lump(lump_id, None, body, bbox)
+
+    # Link body <-> lump
+    body.lump = lump
+
+    # Shell
+    shell_id = id_gen.next_id()
+    shell = se.Shell(shell_id, None, lump, bbox)
+
+    # Link lump <-> shell
+    lump.shell = shell
+
+    # ----------------------------
+    # Temporary placeholder wire
+    # (actual Wire must be created after coedge exists)
+    # ----------------------------
+    wire_id = id_gen.next_id()
+    wire = se.Wire(wire_id, None, shell, bbox)
+
+    # Link shell <-> wire
+    shell.wire = wire
+
+    # Register core entities
+    for ent in (body, lump, shell, wire):
+        sw.add_entity(ent)
+
+    # ---------------------------------------------------------
+    # 2) Create beam edges inside the wire
+    # ---------------------------------------------------------
+    for bm in part.get_all_physical_objects(by_type=Beam):
+        # This returns ONLY edge/coedge/vertex/point/curve
+        new_entities, first_coedge = beam_to_sat_entities(bm, sw, wire)
+        for ent in new_entities:
+            sw.add_entity(ent)
+
+    # After beams are created, update wire.coedge to first coedge
+    wire.coedge = first_coedge
+
+    # ---------------------------------------------------------
+    # 3) Final reordering and renumbering
+    # ---------------------------------------------------------
+    all_entities = sorted(sw.entities.values(), key=lambda x: x.id)
+    sw.entities = {e.id: e for e in all_entities}
+
+    return sw
+
+
+def part_to_sat_writer_old(part: Part | Assembly) -> SatWriter:
     from ada import Plate
 
     sw = SatWriter(part)
 
-    # Beams (not implemented, because it's not strictly necessary to embed in ACIS in order to import beams into Genie)
-    # for bm in part.get_all_physical_objects(by_type=Beam):
-    #     pass
+    # Beams
+    for edge_id, bm in enumerate(part.get_all_physical_objects(by_type=Beam), start=1):
+        edge_name = f"EDGE{edge_id:08d}"
+        # Optionally store mapping if useful
+        # sw.edge_map[bm.guid] = edge_name
+        new_entities = beam_to_sat_entities(bm, edge_name, sw)
+        for entity in new_entities:
+            sw.add_entity(entity)
 
     # Plates
+    '''
     for face_id, pl in enumerate(part.get_all_physical_objects(by_type=Plate), start=1):
         face_name = f"FACE{face_id:08d}"
         sw.face_map[pl.guid] = face_name
         new_entities = plate_to_sat_entities(pl, face_name, GeomRepr.SHELL, sw)
         for entity in new_entities:
             sw.add_entity(entity)
+    '''
 
     # re-arrange entities and make sure all body, lump, shell and face elements are before any further elements
     bodies = sw.get_entities_by_type(se.Body)

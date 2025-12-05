@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Callable
 
 from ...sat.write.writer import part_to_sat_writer
 from .write_bcs import add_concept_constraints, add_fem_boundary_conditions
-from .write_beams import add_beams
+from .write_beams import add_beams, SatWriter, export_genie_xml_with_sat
 from .write_equipments import add_equipments
 from .write_hinges import add_hinges
 from .write_load_case import add_loads
@@ -53,7 +53,10 @@ def write_xml(part: Part, xml_file, embed_sat=False, writer_postprocessor: Calla
         embed_sat_geometry(structure_domain)
 
     # Add structural elements
+    #sw_beam = SatWriter()
+
     add_beams(structures_elem, part, sw)
+
     add_plates(structure_domain, part, sw)
     add_fem_boundary_conditions(structures_elem, part)
     add_masses(structures_elem, part)
@@ -69,23 +72,53 @@ def write_xml(part: Part, xml_file, embed_sat=False, writer_postprocessor: Calla
         writer_postprocessor(root, part)
 
     xml_file.parent.mkdir(exist_ok=True, parents=True)
+
     if embed_sat:
-        # Compress the SAT data
-        sat_bytes = bytes(sw.to_str(), encoding="utf-8")
+        # ---------------------------------------------------------
+        # 1) Generate SAT string
+        # ---------------------------------------------------------
+        sat_str = sw.to_str()
+        sat_bytes = bytes(sat_str, encoding="utf-8")
+
+        # ---------------------------------------------------------
+        # 2) Write raw SAT debug file (before ZIP/base64)
+        # ---------------------------------------------------------
+        try:
+            debug_sat_path = pathlib.Path(xml_file).with_suffix(".debug.sat")
+            with open(debug_sat_path, "w", encoding="utf-8") as dbg:
+                dbg.write(sat_str)
+            print(f"[DEBUG] Wrote raw SAT to: {debug_sat_path}")
+        except Exception as e:
+            print(f"[WARNING] Could not write SAT debug file: {e}")
+
+        # ---------------------------------------------------------
+        # 3) ZIP-compress the SAT
+        # ---------------------------------------------------------
         compressed_io = BytesIO()
         with zipfile.ZipFile(compressed_io, mode="w", compression=zipfile.ZIP_DEFLATED) as zipf:
             zipf.writestr("b64temp.sat", sat_bytes)
+
         compressed_data = compressed_io.getvalue()
 
-        # Encode the compressed data in base64
+        # ---------------------------------------------------------
+        # 4) Base64 encode the compressed SAT
+        # ---------------------------------------------------------
         encoded_data = base64.b64encode(compressed_data).decode()
+
+        # ---------------------------------------------------------
+        # 5) Insert into XML CDATA wrapper
+        # ---------------------------------------------------------
         xml_str = ET.tostring(tree.getroot(), encoding="unicode")
         cdata_section = f"<![CDATA[{encoded_data}]]>"
         xml_str = xml_str.replace("__CDATA_PLACEHOLDER__", cdata_section)
 
-        # Write the modified XML string to the file
+        # ---------------------------------------------------------
+        # 6) Write final GeniE XML output
+        # ---------------------------------------------------------
         with open(xml_file, "w", encoding="utf-8") as file:
             file.write(xml_str)
+
     else:
-        # Write the modified XML back to the file
+        # No SAT embedding — normal XML write
         tree.write(str(xml_file), encoding="utf-8")
+

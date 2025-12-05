@@ -1,28 +1,31 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
-
 import ada
-import ada.geom.direction
 from ada.cadit.sat.utils import make_ints_if_possible
 
 
+# ------------------------
+# Base ACIS Entity
+# ------------------------
 @dataclass
 class SATEntity:
     id: int
 
     def to_string(self) -> str:
-        raise NotImplementedError("Each entity must implement its string representation.")
+        raise NotImplementedError
 
 
+# ------------------------
+#   Body / Lump / Shell
+# ------------------------
 @dataclass
 class Body(SATEntity):
     lump: Lump
     bbox: list[float]
 
-    def to_string(self) -> str:
-        bbox_str = " ".join(str(coord) for coord in self.bbox)
+    def to_string(self):
+        bbox_str = " ".join(str(x) for x in self.bbox)
         return f"-{self.id} body $-1 -1 -1 $-1 ${self.lump.id} $-1 $-1 T {bbox_str} #"
 
 
@@ -33,47 +36,74 @@ class Lump(SATEntity):
     bbox: list[float]
     next_lump: Lump = None
 
-    def to_string(self) -> str:
-        bbox_str = " ".join(str(coord) for coord in self.bbox)
-        next_lump = -1 if self.next_lump is None else self.next_lump.id
-        return f"-{self.id} lump $-1 -1 -1 $-1 ${next_lump} ${self.shell.id} ${self.body.id} T {bbox_str} #"
+    def to_string(self):
+        bbox_str = " ".join(str(x) for x in self.bbox)
+        nl = -1 if self.next_lump is None else self.next_lump.id
+        return f"-{self.id} lump $-1 -1 -1 $-1 ${nl} ${self.shell.id} ${self.body.id} T {bbox_str} #"
 
 
 @dataclass
 class Shell(SATEntity):
-    face: Face
+    wire: Wire
     lump: Lump
     bbox: list[float]
 
     def to_string(self) -> str:
         bbox_str = " ".join(str(coord) for coord in self.bbox)
-        return f"-{self.id} shell $-1 -1 -1 $-1 $-1 $-1 ${self.face.id} $-1 ${self.lump.id} T {bbox_str} #"
+        # Match GeniE beam SAT exactly:
+        # -2 shell $-1 -1 -1 $-1 $-1 $-1 $-1 $3 $1 T ...
+        return (
+            f"-{self.id} shell $-1 -1 -1 $-1 $-1 $-1 "
+            f"$-1 ${self.wire.id} ${self.lump.id} T {bbox_str} #"
+        )
 
 
+
+# ------------------------
+#   Wire (instead of Face/Loop)
+# ------------------------
 @dataclass
-class Face(SATEntity):
-    loop: Loop
-    shell: Shell
-    name: StringAttribName
-    surface: PlaneSurface
-
-    def to_string(self) -> str:
-        return f"-{self.id} face ${self.name.id} -1 -1 $-1 $-1 ${self.loop.id} ${self.shell.id} $-1 ${self.surface.id} forward double out F F #"
-
-
-@dataclass
-class Loop(SATEntity):
+class Wire(SATEntity):
     coedge: CoEdge
+    shell: Shell
     bbox: list[float]
-    periphery_plane: PlaneSurface = None
 
-    def to_string(self) -> str:
-        bbox_str = " ".join(str(coord) for coord in self.bbox)
-        periphery = "unknown"
-        if self.periphery_plane is not None:
-            periphery = f"periphery ${self.periphery_plane.id} F"
+    def to_string(self):
+        bbox_str = " ".join(str(x) for x in self.bbox)
+        return f"-{self.id} wire $-1 -1 -1 $-1 $-1 ${self.coedge.id} ${self.shell.id} $-1 out T {bbox_str} #"
 
-        return f"-{self.id} loop $-1 -1 -1 $-1 $-1 ${self.coedge.id} $3 T {bbox_str} {periphery} #"
+
+# ------------------------
+#   CoEdge
+# ------------------------
+@dataclass
+class CoEdge(SATEntity):
+    next_coedge: CoEdge
+    prev_coedge: CoEdge
+    edge: Edge
+    wire: Wire
+    orientation: Literal["forward", "reverse"]
+
+    def to_string(self):
+        nxt = self.next_coedge.id if self.next_coedge else self.id
+        prv = self.prev_coedge.id if self.prev_coedge else self.id
+        return (
+            f"-{self.id} coedge $-1 -1 -1 $-1 "
+            f"${nxt} ${prv} $-1 ${self.edge.id} {self.orientation} "
+            f"${self.wire.id} $-1 #"
+        )
+
+
+# ------------------------
+#   Vertex / Point
+# ------------------------
+@dataclass
+class SatPoint(SATEntity):
+    point: ada.Point
+
+    def to_string(self):
+        p = " ".join(str(x) for x in make_ints_if_possible(self.point))
+        return f"-{self.id} point $-1 -1 -1 $-1 {p} #"
 
 
 @dataclass
@@ -81,31 +111,27 @@ class Vertex(SATEntity):
     edge: Edge
     point: SatPoint
 
-    def to_string(self) -> str:
+    def to_string(self):
         return f"-{self.id} vertex $-1 -1 -1 $-1 ${self.edge.id} ${self.point.id} #"
 
 
+# ------------------------
+#   Straight Curve
+# ------------------------
 @dataclass
-class SatPoint(SATEntity):
-    point: ada.Point
+class StraightCurve(SATEntity):
+    start_pt: ada.Point
+    direction: ada.Direction
 
-    def to_string(self) -> str:
-        point_str = " ".join(str(x) for x in make_ints_if_possible(self.point))
-        return f"-{self.id} point $-1 -1 -1 $-1 {point_str} #"
-
-
-@dataclass
-class CoEdge(SATEntity):
-    next_coedge: CoEdge
-    prev_coedge: CoEdge
-    edge: Edge
-    loop: Loop
-    orientation: Literal["forward", "reverse"]
-
-    def to_string(self) -> str:
-        return f"-{self.id} coedge $-1 -1 -1 $-1 ${self.next_coedge.id} ${self.prev_coedge.id} $-1 ${self.edge.id} {self.orientation} ${self.loop.id} $-1 #"
+    def to_string(self):
+        p = " ".join(str(x) for x in make_ints_if_possible(self.start_pt))
+        d = " ".join(str(x) for x in make_ints_if_possible(self.direction.get_normalized()))
+        return f"-{self.id} straight-curve $-1 -1 -1 $-1 {p} {d} I I #"
 
 
+# ------------------------
+#   Edge
+# ------------------------
 @dataclass
 class Edge(SATEntity):
     vertex_start: Vertex
@@ -117,108 +143,29 @@ class Edge(SATEntity):
     end_pt: ada.Point
     attrib_name: StringAttribName = None
 
-    def to_string(self) -> str:
-        attrib_ref = "-1"
-        if self.attrib_name:
-            attrib_ref = self.attrib_name.id
-        start_str = " ".join([str(x) for x in make_ints_if_possible(self.start_pt)])
-        end_str = " ".join([str(x) for x in make_ints_if_possible(self.end_pt)])
-        # pos_str = f"{self.start_pt[0]} {self.start_pt[1]} {self.start_pt[2]} {self.end_pt[0]} {self.end_pt[1]} {self.end_pt[2]}"
-        vec = ada.Direction(self.end_pt - self.start_pt)
-        length = vec.get_length()
-        s1 = 0
-        s2 = make_ints_if_possible([length])[0]
-        return f"-{self.id} edge ${attrib_ref} -1 -1 $-1 ${self.vertex_start.id} {s1} ${self.vertex_end.id} {s2} ${self.coedge.id} ${self.straight_curve.id} forward @7 unknown T {start_str} {end_str} #"
+    def to_string(self):
+        attr = self.attrib_name.id if self.attrib_name else -1
+        p1 = " ".join(str(x) for x in make_ints_if_possible(self.start_pt))
+        p2 = " ".join(str(x) for x in make_ints_if_possible(self.end_pt))
+        return (
+            f"-{self.id} edge ${attr} -1 -1 $-1 "
+            f"${self.vertex_start.id} 0 ${self.vertex_end.id} 1 "
+            f"${self.coedge.id} ${self.straight_curve.id} forward @7 unknown T {p1} {p2} #"
+        )
 
 
-@dataclass
-class StraightCurve(SATEntity):
-    start_pt: ada.Point
-    direction: ada.Direction
-
-    def to_string(self) -> str:
-        start_str = " ".join([str(x) for x in make_ints_if_possible(self.start_pt)])
-        direction_str = " ".join([str(x) for x in make_ints_if_possible(self.direction.get_normalized())])
-        return f"-{self.id} straight-curve $-1 -1 -1 $-1 {start_str} {direction_str} I I #"
-
-
-@dataclass
-class PlaneSurface(SATEntity):
-    centroid: ada.Point
-    normal: ada.Direction
-    xvec: ada.Direction
-
-    def to_string(self) -> str:
-        centroid_str = " ".join([str(x) for x in make_ints_if_possible(self.centroid)])
-        normal_str = " ".join([str(x) for x in make_ints_if_possible(self.normal)])
-        xvec_str = " ".join([str(x) for x in make_ints_if_possible(self.xvec)])
-        return f"-{self.id} plane-surface $-1 -1 -1 $-1 {centroid_str} {normal_str} {xvec_str} forward_v I I I I #"
-
-
+# ------------------------
+#   String Attribute
+# ------------------------
 @dataclass
 class StringAttribName(SATEntity):
     name: str
     entity: SATEntity
-    attrib_ref: CachedPlaneAttribute | FusedFaceAttribute | FusedEdgeAttribute = None
 
-    def to_string(self) -> str:
-        cache_attrib = -1 if self.attrib_ref is None else self.attrib_ref.id
-        return f"-{self.id} string_attrib-name_attrib-gen-attrib $-1 -1 ${cache_attrib} $-1 ${self.entity.id} 2 1 1 1 1 1 1 1 1 1 1 1 1 1 0 1 1 1 @6 dnvscp @12 {self.name} #"
-
-
-@dataclass
-class CachedPlaneAttribute(SATEntity):
-    entity: SATEntity
-    name: StringAttribName
-    centroid: ada.Point
-    normal: ada.Direction
-
-    def to_string(self) -> str:
-        centroid_str = " ".join([str(x) for x in make_ints_if_possible(self.centroid)])
-        normal_str = " ".join([str(x) for x in make_ints_if_possible(self.normal)])
-        if isinstance(self.entity, int):
-            entity = self.entity
-        else:
-            entity = self.entity.id
-        return f"-{self.id} CachedPlaneAttribute-DNV-attrib $-1 -1 $-1 ${self.name.id} ${entity} 1 1 1 1 1 1 1 1 1 1 1 1 0 1 0 1 1 1 {centroid_str} {normal_str} 1 #"
-
-
-@dataclass
-class PositionAttribName(SATEntity):
-    position_attrib: PositionAttribName
-    fused_face_attrib: FusedFaceAttribute
-    face: Face
-    face_bbox: list[float]
-    box_attrib: Literal["ExactBoxLow", "ExactBoxHigh"]
-
-    def to_string(self) -> str:
-        if self.box_attrib == "ExactBoxLow":
-            box_attrib = "@11 ExactBoxLow " + " ".join([str(x) for x in self.face_bbox[:3]])
-        else:
-            box_attrib = "@12 ExactBoxHigh " + " ".join([str(x) for x in self.face_bbox[3:]])
-
-        return f"-{self.id} position_attrib-name_attrib-gen-attrib $-1 -1 ${self.position_attrib.id} ${self.fused_face_attrib.id} ${self.face.id} 2 0 0 0 1 1 1 1 1 1 1 1 1 1 0 1 1 1 {box_attrib} #"
-
-
-@dataclass
-class FusedFaceAttribute(SATEntity):
-    name: StringAttribName
-    posattrib: PositionAttribName
-    face: Face
-
-    def to_string(self) -> str:
-        return f"-{self.id} FusedFaceAttribute-DNV-attrib $-1 -1 ${self.posattrib.id} ${self.name.id} ${self.face.id} 1 1 1 1 1 1 1 1 1 1 1 1 0 1 0 1 1 1 F 1 0 0 #"
-
-
-@dataclass
-class FusedEdgeAttribute(SATEntity):
-    name: StringAttribName
-    entity: SATEntity
-    edge_idx: int
-    edge_seq: tuple[int, int]
-    edge_length: int | float
-
-    def to_string(self) -> str:
-        length = make_ints_if_possible([self.edge_length])[0]
-        edge_spec = f"{self.edge_seq[0]} {self.edge_seq[1]} {self.edge_idx} 0 {length}"
-        return f"-{self.id} FusedEdgeAttribute-DNV-attrib $-1 -1 $-1 ${self.name.id} ${self.entity.id} 1 1 1 1 1 1 1 1 1 1 1 1 0 1 0 1 1 1 1 {edge_spec} #"
+    def to_string(self):
+        return (
+            f"-{self.id} string_attrib-name_attrib-gen-attrib "
+            f"$-1 -1 $-1 $-1 ${self.entity.id} "
+            f"2 1 1 1 1 1 1 1 1 1 1 1 1 1 0 1 1 1 "
+            f"@6 dnvscp @12 {self.name} #"
+        )

@@ -25,8 +25,8 @@ def iter_beams_from_xml(xml_path):
     for bm_el in all_beams:
         yield from el_to_beam(bm_el, p)
 
-
-def apply_mass_density_factors(root, p: Part):
+#todo remove?
+def OLDapply_mass_density_factors(root, p: Part):
     mass_density_factors = {e.attrib["name"]: float(e.attrib["factor"]) for e in root.findall(".//mass_density_factor")}
     for bm in p.beams:
         mdf = bm.metadata.get("mass_density_factor_ref", None)
@@ -44,6 +44,30 @@ def apply_mass_density_factors(root, p: Part):
         else:
             bm.material = existing_mat
 
+def apply_mass_density_factors(root, p: Part):
+    mass_density_factors = {
+        e.attrib["name"]: float(e.attrib["factor"])
+        for e in root.findall(".//mass_density_factor")
+    }
+
+    for bm in p.beams:
+        mdf = bm.metadata.get("mass_density_factor_ref")
+        if not mdf:
+            continue
+
+        mdf_value = mass_density_factors.get(mdf)
+        if mdf_value is None:
+            continue
+
+        mat_name = f"{bm.material.name}_{mdf}"
+        existing_mat = p.materials.name_map.get(mat_name)
+
+        if existing_mat is None:
+            new_mat = bm.material.copy_to(new_name=mat_name)
+            new_mat.model.rho *= mdf_value
+            bm.material = p.add_material(new_mat)
+        else:
+            bm.material = existing_mat
 
 def yield_plate_elems_to_plate(plate_elem, parent, sat_ref_d, thick_map):
     from ada import Plate

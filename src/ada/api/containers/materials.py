@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import reprlib
 from itertools import chain
+from numbers import Integral
 from operator import attrgetter
 from typing import TYPE_CHECKING, Dict, Iterable, Union
 
@@ -21,9 +22,9 @@ class Materials(NumericMapped):
     def __init__(self, materials: Iterable[Material] = None, parent: Union[Part, Assembly] = None, units=Units.M):
         super().__init__(parent)
         self.materials = sorted(materials, key=attrgetter("name")) if materials is not None else []
-        self.recreate_name_and_id_maps(self.materials)
         self._units = units
-        self._max_id = None  # Cache for max_id to avoid O(n) recalculation
+        self._max_id = 0
+        self._normalize_material_ids()
 
     def __contains__(self, item: Material):
         return item.name in self._name_map.keys()
@@ -62,6 +63,44 @@ class Materials(NumericMapped):
         rpr.maxlevel = 1
         return f"Materials({rpr.repr(self.materials) if self.materials else ''})"
 
+    def _normalize_material_ids(self):
+        """Ensure all materials have unique positive integer ids."""
+        used_ids = set()
+        next_id = 1
+
+        for mat in self.materials:
+            mat_id = getattr(mat, "id", None)
+
+            is_valid = (
+                isinstance(mat_id, Integral)
+                and int(mat_id) > 0
+                and int(mat_id) not in used_ids
+            )
+
+            if is_valid:
+                mat.id = int(mat_id)
+                used_ids.add(mat.id)
+                next_id = max(next_id, mat.id + 1)
+            else:
+                while next_id in used_ids:
+                    next_id += 1
+                mat.id = next_id
+                used_ids.add(next_id)
+                next_id += 1
+
+        self.recreate_name_and_id_maps(self.materials)
+        self._max_id = max(used_ids, default=0)
+
+    def _next_material_id(self) -> int:
+        numeric_ids = [
+            int(k) for k in self._id_map.keys()
+            if isinstance(k, Integral) and int(k) > 0
+        ]
+        current_max = max(numeric_ids, default=0)
+        cached_max = int(self._max_id) if isinstance(self._max_id, Integral) else 0
+        self._max_id = max(current_max, cached_max) + 1
+        return self._max_id
+
     def merge_materials_by_properties(self):
         models = {}  # Use dict for O(1) lookup
         final_mats = []
@@ -80,7 +119,7 @@ class Materials(NumericMapped):
                     ref.material = replacement_mat
 
         self.materials = final_mats
-        self.recreate_name_and_id_maps(self.materials)
+        self._normalize_material_ids()
 
     def _make_hashable_key(self, props_tuple):
         """Convert properties tuple to a hashable key, handling numpy arrays"""
@@ -135,15 +174,23 @@ class Materials(NumericMapped):
     def renumber_id(self, start_id=1):
         cnt = Counter(start=start_id)
         new_max_id = start_id - 1
-        for mat_id in sorted(self.id_map.keys()):
-            mat = self.get_by_id(mat_id)
+
+        ordered_materials = sorted(
+            self.materials,
+            key=lambda mat: (
+                0 if isinstance(getattr(mat, "id", None), Integral) and int(mat.id) > 0 else 1,
+                int(mat.id) if isinstance(getattr(mat, "id", None), Integral) and int(mat.id) > 0 else 0,
+                mat.name,
+            ),
+        )
+
+        for mat in ordered_materials:
             new_id = next(cnt)
             mat.id = new_id
             new_max_id = new_id
+
         self.recreate_name_and_id_maps(self.materials)
-        # Update max_id cache after renumbering
-        if hasattr(self, "_max_id"):
-            self._max_id = new_max_id
+        self._max_id = new_max_id
 
     @property
     def name_map(self) -> Dict[str, Material]:
@@ -186,14 +233,16 @@ class Materials(NumericMapped):
             return existing
 
         # 2) Assign a fresh id if needed
-        mat_id = material.id
-        if mat_id is None or mat_id in id_map:
-            # Use cached max_id if available, otherwise calculate efficiently
-            if hasattr(self, "_max_id") and self._max_id is not None:
-                mat_id = self._max_id + 1
-            else:
-                mat_id = max(id_map.keys()) + 1 if id_map else 1
+        mat_id = getattr(material, "id", None)
+        if not isinstance(mat_id, Integral) or int(mat_id) <= 0 or mat_id in id_map:
+            mat_id = self._next_material_id()
+        else:
+            mat_id = int(mat_id)
             material.id = mat_id
+            if mat_id > self._max_id:
+                self._max_id = mat_id
+
+        material.id = mat_id
 
         # 3) Insert in O(1)
         mats.append(material)
@@ -201,8 +250,7 @@ class Materials(NumericMapped):
         name_map[material.name] = material
 
         # 4) Update max_id cache
-        if hasattr(self, "_max_id"):
-            if self._max_id is None or mat_id > self._max_id:
-                self._max_id = mat_id
+        if mat_id > self._max_id:
+            self._max_id = mat_id
 
         return material

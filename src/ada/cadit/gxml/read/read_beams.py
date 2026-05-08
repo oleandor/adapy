@@ -138,12 +138,16 @@ def get_alignment(bm_el: ET.Element, segments: list[Beam]) -> tuple[Direction | 
     elif sec0.type == sec0.TYPES.IPROFILE and sec0.w_btn != sec0.w_top:
         # Note: this logic must be  aligned with to_gxml_unsymm_i_section in write_sections.js
         if (
+            # todo this is not correct!
             sec0.t_fbtn == sec0.t_ftop and sec0.t_w == sec0.w_btn
         ):  # this aims to identify a genie TPROFILE implemented as an unsymmetric IPROFILE
             offset = flush_factor * zv * sec0.properties.Cgz
             return offset, justification
         else:
-            logger.warning(f"The section {sec0.name} type {sec0.type} is not yet tested for Genie XML read")
+            logger.warning(f"The section {sec0.name} type {sec0.type} is not yet tested for Genie XML read. sec0.w_btn: {sec0.w_btn}, sec0.t_w: {sec0.t_w}, sec0.w_top: {sec0.w_top}, sec0.t_fbtn: {sec0.t_fbtn}, sec0.t_ftop: {sec0.t_ftop}")
+            logger.warning(f"{sec0.t_fbtn} == {sec0.t_ftop}")
+            logger.warning(f"{sec0.t_w} == {sec0.w_btn}")
+
             offset = flush_factor * zv * sec0.h / 2
             return offset, justification
     else:

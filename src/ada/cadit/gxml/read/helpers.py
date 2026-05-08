@@ -25,24 +25,6 @@ def iter_beams_from_xml(xml_path):
     for bm_el in all_beams:
         yield from el_to_beam(bm_el, p)
 
-#todo remove?
-def OLDapply_mass_density_factors(root, p: Part):
-    mass_density_factors = {e.attrib["name"]: float(e.attrib["factor"]) for e in root.findall(".//mass_density_factor")}
-    for bm in p.beams:
-        mdf = bm.metadata.get("mass_density_factor_ref", None)
-        if mdf is None:
-            continue
-
-        mdf_value = mass_density_factors[mdf]
-        mat_name = f"{bm.material.name}_{mdf}"
-        existing_mat = p.materials.name_map.get(mat_name, None)
-
-        if existing_mat is None:
-            bm.material = bm.material.copy_to(new_name=mat_name)
-            bm.material.model.rho *= mdf_value
-            p.add_material(bm.material)
-        else:
-            bm.material = existing_mat
 
 def apply_mass_density_factors(root, p: Part):
     mass_density_factors = {

@@ -42,6 +42,7 @@ def convertXMLtoIFC(pathAndFileName):
 
 
 #pathAndFileName = r"c:\Aibelprogs\projects\Utror_concept\XML_to_IFC\Utror_6k_pl_v2005_FAL_noCage_ULST11.xml"
-pathAndFileName = r"c:\AibelProgs\Downloads\xmlexp 1.xml"
+#pathAndFileName = r"c:\AibelProgs\Downloads\xmlexp 1.xml"
+pathAndFileName = r"c:\Aibelprogs\tmp\miguel\beams_constant_offset.xml"
 
 convertXMLtoIFC(pathAndFileName)

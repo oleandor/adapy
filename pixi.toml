@@ -12,6 +12,8 @@ json-code-gen-py = { cmd = [
     "--input-file-type", "jsonschema",
     "--output", "src/ada/extension",
     "--output-model-type", "pydantic_v2.BaseModel"], cwd = "./" }
+# Generate the adacpp C++ header for ADA_EXT_data from the same schema (sibling adacpp checkout).
+json-code-gen-cpp = { cmd = ["python", "scripts/codegen_ada_ext_cpp.py"], cwd = "./" }
 
 [feature.docs.tasks]
 docs = { cmd = "cd docs && sphinx-build -b html -v -D nbsphinx_execute=auto -d _build/doctrees . _build/html", depends-on = ["fea-doc"], env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
@@ -94,17 +96,27 @@ tests = { features = ["tests", "tests-core", "prod", "pyocc", "desktop"], solve-
 # Own solve-group: ada-cpp's occt closure must not be forced onto the
 # pythonocc-pinned `prod` group. Run with: pixi run -e tests-adacpp test
 tests-adacpp = { features = ["adacpp", "tests", "tests-core", "prod", "desktop"], solve-group = "adacpp", no-default-feature = true }
+# Same as tests-adacpp but bridges a bleeding-edge adacpp via PYTHONPATH (../adacpp/build/dist)
+# instead of the conda-installed ada-cpp — see [feature.adacpp-dev.activation.env]. Assemble the
+# bridge first with `pixi run build-dist` in the adacpp repo. The adacpp-dev feature adds no
+# dependencies, so this reuses the adacpp solve-group (no extra solve).
+tests-adacpp-dev = { features = ["adacpp", "adacpp-dev", "tests", "tests-core", "prod", "desktop"], solve-group = "adacpp", no-default-feature = true }
 fem-deps = { features = ["fem-deps", "prod", "pyocc", "tests-core"], no-default-feature = true }
 # `tests` feature added so the pyocc side of `test-all` can run the whole
 # non-REST suite, including the playwright frontend e2e tests (which live
 # only under tests/full/frontend and need the `tests` feature's playwright).
 fem = { features = ["fem", "tests", "prod", "pyocc", "desktop", "tests-core", "fem-deps"], no-default-feature = true }
 docs = { features = ["docs", "prod", "pyocc", "desktop", "fem-deps", "tests-core"], no-default-feature = true }
-viewer-api = { features = ["viewer-api", "prod", "pyocc"], solve-group = "prod", no-default-feature = true }
+viewer-api = { features = ["viewer-api", "prod", "pyocc", "adacpp-runtime"], solve-group = "prod", no-default-feature = true }
 # Slim runtime for the Dockerfile.viewer image — no `prod` so the
 # occt/pythonocc/numpy closure stays out.
-viewer-api-slim = { features = ["viewer-api"], no-default-feature = true }
+viewer-api-slim = { features = ["viewer-api", "viewer-slim"], no-default-feature = true }
 viewer-api-tests = { features = ["viewer-api", "tests-core", "prod", "pyocc"], solve-group = "prod", no-default-feature = true }
+# Same as viewer-api-tests but adds ada-cpp (adacpp-runtime) so the REST streaming-path tests run
+# against the AdacppBackend (tessellate_stream / NGEOM libtess2) instead of the OCC object-path
+# fallback. Mirrors the production `viewer-api` env's closure (pyocc + adacpp-runtime share occt
+# 7.9.3, solve-group prod) — NOT the `adacpp` feature (separate solve-group, drops pyocc by design).
+viewer-api-tests-adacpp = { features = ["viewer-api", "tests-core", "prod", "pyocc", "adacpp-runtime"], solve-group = "prod", no-default-feature = true }
 meshio-bridge = { features = ["meshio-bridge", "prod", "pyocc", "desktop"], solve-group = "prod", no-default-feature = true }
 meshio-bridge-tests = { features = ["meshio-bridge", "tests-core", "prod", "pyocc", "desktop"], solve-group = "prod", no-default-feature = true }
 
@@ -128,17 +140,37 @@ meshio = "*"
 pythonocc-core = { version = "7.9.3.*", build = "novtk_*" }
 occt = { version = "7.9.3.*", build = "novtk_*" }
 
+# ada-cpp as a *runtime library alongside pyocc* — no ADAPY_CAD_BACKEND flip (unlike
+# the `adacpp` feature). The conversion worker (viewer-api env) needs ada-cpp present
+# so the default libtess2 STEP→GLB pipeline can run; pyocc stays the default backend
+# for every other path (IFC/XML/FEM, occ-builtin fallback). Shares occt 7.9.3 with
+# pyocc (see above) so both coexist in one env.
+[feature.adacpp-runtime.dependencies]
+ada-cpp = "0.12.0.*"
+
 # ada-cpp CAD backend (AdacppBackend) — native CPython build of the
 # wasm-capable kernel. Brings its own occt 7.9.3 + gmsh + ifcopenshell,
 # and deliberately does NOT pull pythonocc-core, so an environment with
 # `adacpp` and without `pyocc` exercises adacpp as the sole CAD backend
 # (no pythonocc fallback by design).
 [feature.adacpp.dependencies]
-# 0.8.0 carries build_swept_disk_solid (IfcSweptDiskSolid parity); see adapy AdacppBackend.
-ada-cpp = "0.8.0.*"
+# 0.10.x carries the NGEOM libtess2 tessellator + meshopt EXT-compression codecs
+# (cad.meshopt_encode_*) + ifc-taxonomy kernel; adapy's meshopt/NGEOM paths need it. 0.11 adds
+# the native STEP/IFC B-rep emitters + step_parity. 0.12 adds SAT pcurve trim records (kind-6
+# tail), plain-SHAPE_REPRESENTATION product linkage, $-surface face recovery, the sew face-count
+# cap, and the cgroup-aware concurrency clamp — adapy's pcurve/parity paths here require it.
+ada-cpp = "0.12.0.*"
 
 [feature.adacpp.activation.env]
 ADAPY_CAD_BACKEND = "adacpp"
+
+# Bleeding-edge adacpp bridge: prepend ../adacpp/build/dist (the importable package assembled
+# by `pixi run build-dist` in the adacpp repo) so its freshly built native .so shadows the
+# conda-installed ada-cpp. Also keeps src/ on the path so `ada` resolves. Used by the
+# tests-adacpp-dev environment; only applies to commands that don't set PYTHONPATH inline
+# (run scripts directly, e.g. `pixi run -e tests-adacpp-dev python prototypes/...`).
+[feature.adacpp-dev.activation.env]
+PYTHONPATH = "$PIXI_PROJECT_ROOT/src:$PIXI_PROJECT_ROOT/../adacpp/build/dist"
 
 [feature.adacpp.tasks]
 # ada-cpp leg of `test-all`. Runs the whole non-REST suite against the native
@@ -154,6 +186,10 @@ test-all = { cmd = "pytest tests --ignore=tests/comms/rest --ignore=tests/fem/vi
 python = "3.12.*"
 bcf-client = "*"
 numpy = "*"
+# Force the OpenBLAS BLAS/LAPACK backend. The MKL 2026 preview that the
+# solver otherwise picks (mkl_avx10.3) SEH-crashes (0xc06d007f) on np.linalg
+# (svd/gemm) on Windows here, taking down the FEA bake and any svd path.
+libblas = { version = "*", build = "*openblas" }
 hdf5 = "*"
 h5py = "*"
 ifcopenshell = "*"
@@ -253,16 +289,51 @@ httpx = "*"
 asyncpg = "*"
 psutil = "*"
 croniter = "*"
+# parallel gzip: derived outputs (obj/stl/step/ifc/xml/glb) are gzipped at-rest, and
+# single-threaded zlib at level 9 was ~85% of the crane STEP->obj job wall. pigz emits
+# a standard gzip stream (Content-Encoding: gzip) across all cores — see storage._gzip_file.
+pigz = "*"
 
+# Pin the slim API image's python (it has no `prod`, so it would otherwise float to
+# the newest cpython). Pinned to what it currently resolves to (3.14) for a
+# reproducible image; kept separate from the full env's prod-pinned 3.12 to avoid a
+# cross-feature python conflict.
+[feature.viewer-slim.dependencies]
+python = "3.14.*"
+
+# PYTHONPATH must keep /opt/adacpp-overlay AHEAD of src so the deployed worker imports the
+# branch-built adacpp (with the native stream_step_to_glb) rather than the conda base adacpp. The
+# Dockerfile sets this env, but a task-level `env` REPLACES (not merges) it — so without the overlay
+# prefix here the worker silently imported base adacpp, native_adacpp_available() returned False, and
+# every adacpp-native STEP→GLB fell back to the slow libtess2 path. The path is absent in dev/CI and
+# in the (overlay-less) viewer image, where Python just ignores the missing sys.path entry.
 [feature.viewer-api.tasks]
-viewer-api = { cmd = "python -m ada.comms.rest", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
-viewer-worker = { cmd = "python -m ada.comms.rest.worker", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
+viewer-api = { cmd = "python -m ada.comms.rest", env = { "PYTHONPATH" = "/opt/adacpp-overlay:$PIXI_PROJECT_ROOT/src" } }
+viewer-worker = { cmd = "python -m ada.comms.rest.worker", env = { "PYTHONPATH" = "/opt/adacpp-overlay:$PIXI_PROJECT_ROOT/src" } }
 test-rest = { cmd = "pytest tests/comms/rest --durations=0", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
+# Streaming-path REST coverage against the native ada-cpp backend: forces ADAPY_CAD_BACKEND=adacpp so
+# merge-preview generate exercises tessellate_stream (NGEOM libtess2), not the OCC object-path fallback
+# that test-rest hits in the (adacpp-less) viewer-api-tests env. Run in the viewer-api-tests-adacpp env.
+# No Postgres needed — these tests use an in-memory fake store.
+test-rest-adacpp = { cmd = "pytest tests/comms/rest -m adacpp_stream --durations=0", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src", "ADAPY_CAD_BACKEND" = "adacpp" } }
 ada = { cmd = "python -m ada_cli.main", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
 audit-fetch = { cmd = "python scripts/audit_fetch.py", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
 audit-repro = { cmd = "python scripts/audit_repro.py", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
 viewer-upload = { cmd = "python scripts/viewer_upload.py", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
 glb-face-classify = { cmd = "python scripts/glb_face_classify.py", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
+
+# Windows: PYTHONPATH uses ';' as separator, so the ':'-joined overlay prefix above turns the whole
+# value into one bogus path and `python -m ada.comms.rest` dies with ModuleNotFoundError. The
+# /opt/adacpp-overlay prefix is a Linux-deploy concern only, so the win-64 override drops it.
+[feature.viewer-api.target.win-64.tasks]
+viewer-api = { cmd = "python -m ada.comms.rest", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
+viewer-worker = { cmd = "python -m ada.comms.rest.worker", env = { "PYTHONPATH" = "$PIXI_PROJECT_ROOT/src" } }
+
+# NOTE: meshopt GLB compression (ada.visit.gltf.meshopt) no longer pulls the PyPI
+# `meshoptimizer` package — it is sdist-only (no wheels) so every viewer/worker image
+# tried to compile it from source and failed (no g++). The EXT_meshopt_compression
+# encoders now live in adacpp (vendored meshoptimizer C source, cad.meshopt_encode_*);
+# the compress path uses them when adacpp is present and gracefully skips otherwise.
 
 [feature.frontend.dependencies]
 nodejs = "24.*"

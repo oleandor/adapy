@@ -3,7 +3,16 @@ import {prepareLoadedModel} from "./prepareLoadedModel";
 import {useModelState} from "@/state/modelState";
 import {useOptionsStore} from "@/state/optionsStore";
 import {useAnimationStore} from "@/state/animationStore";
-import {animationControllerRef, modelKeyMapRef, sceneRef, simulationDataRef, adaExtensionRef} from "@/state/refs";
+import {
+    animationControllerRef,
+    cameraRef,
+    controlsRef,
+    modelKeyMapRef,
+    sceneRef,
+    simulationDataRef,
+    adaExtensionRef,
+} from "@/state/refs";
+import {zoomToAll} from "./setupCameraControlsHandlers";
 import {SimulationDataExtensionMetadata} from "@/extensions/design_and_analysis_extension";
 import {requestRender} from "@/state/perfStore";
 import {FilePurpose} from "@/flatbuffers/base/file-purpose";
@@ -12,6 +21,8 @@ import {mapAnimationTargets} from "@/utils/scene/animations/mapAnimationTargets"
 import {loadGLTF} from "./asyncModelLoader";
 import {AnimationController} from "@/utils/scene/animations/AnimationController";
 import {updateAllPointsSize} from "@/utils/scene/updatePointSizes";
+import type {LoadMetricsRecorder} from "@/utils/scene/loadMetrics";
+import {fastSceneBox} from "@/utils/scene/boundsFast";
 
 /** Optional hook to mutate the freshly-loaded gltf scene (typically
  * to inject ``userData["draw_ranges_<meshName>"]`` and
@@ -27,6 +38,10 @@ export async function setupModelLoaderAsync(
     translate: boolean = true,
     prepareHook?: SetupModelPrepareHook,
     sourceName?: string,
+    // Auth headers for loading directly from the authed REST streaming GET (REST-mode view).
+    requestHeaders?: Record<string, string>,
+    // Optional admin load-metrics recorder (REST view path). No-op when absent.
+    metrics?: LoadMetricsRecorder | null,
 ): Promise<THREE.Group> {
     if (sceneRef.current == null) {
         console.error("Scene reference is null");
@@ -35,12 +50,19 @@ export async function setupModelLoaderAsync(
 
     const main_scene = sceneRef.current;
 
+    // Whether this is the first model going into an empty scene, decided before
+    // the load so the camera fit below can tell a primary load from an overlay.
+    // clear_loaded_model empties this map, so opening a new model fits, while
+    // overlaying a second file onto a scene the user has already framed does not
+    // yank their camera (overlay_file_in_scene comes through here too).
+    const isFirstModelInScene = (modelKeyMapRef.current?.size ?? 0) === 0;
+
     // 3) prepare & add the model to the scene
     const modelGroup = new THREE.Group();
     if (!modelUrl) return modelGroup;
 
     // 1) load the GLTF
-    const gltf = await loadGLTF(modelUrl);
+    const gltf = await loadGLTF(modelUrl, undefined, requestHeaders, metrics);
 
     const gltf_scene = gltf.scene;
     const animations = gltf.animations;
@@ -111,7 +133,10 @@ export async function setupModelLoaderAsync(
         console.log("Model already translated");
         gltf_scene.position.add(modelStore.translation);
     } else {
-        const boundingBox = new THREE.Box3().setFromObject(gltf_scene);
+        // Union of per-geometry boundingBoxes (set cheaply in
+        // prepareLoadedModel via fastComputeBounds) — avoids setFromObject's
+        // per-vertex iteration on large models.
+        const boundingBox = fastSceneBox(gltf_scene);
         modelStore.setBoundingBox(boundingBox);
 
         if (!optionsStore.lockTranslation) {
@@ -136,11 +161,37 @@ export async function setupModelLoaderAsync(
     modelGroup.add(gltf_scene);
 
     main_scene.add(modelGroup);
+    // Mesh/material/tree build is done; the model is now in the scene.
+    // finalize() captures GPU/first-render via a post-add rAF, gathers
+    // payload + device + profile, and posts the load-metrics row.
+    metrics?.markPrepareDone();
+    metrics?.finalize(modelGroup, gltf as unknown as {parser?: {json?: any}});
     // The render loop only fires on OrbitControls 'change' events
     // or explicit ``requestRender()`` calls (ThreeCanvas.tsx:158).
     // Without this kick the freshly-added model only paints once the
     // user rotates / pans the camera.
     requestRender();
+
+    // Frame the model on open, so it lands fitted in the viewport instead of
+    // wherever the default camera happens to look (on a large topside that is
+    // often inside the geometry, or far enough out that the model is a speck).
+    // Deferred a frame: the canvas needs its final size for camera.aspect, and
+    // the meshes need to be in the scene graph for the bounding box. Same code
+    // path as the Shift+A "zoom to all" shortcut, so helper/hidden objects are
+    // excluded identically.
+    if (isFirstModelInScene) {
+        requestAnimationFrame(() => {
+            const camera = cameraRef.current;
+            const controls = controlsRef.current;
+            if (!camera || !controls) return;
+            try {
+                zoomToAll(main_scene, camera, controls, false);
+                requestRender();
+            } catch (err) {
+                console.warn("Initial zoom-to-fit failed:", err);
+            }
+        });
+    }
 
     // Ensure point sizes and sizing mode are applied after the model is in the scene,
     // so points are visible immediately without needing the Options panel.

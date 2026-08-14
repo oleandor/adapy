@@ -1750,6 +1750,7 @@ def build_manifest(
     mesh_glb_filename: str,
     field_metas: list[FieldArtefactMeta],
     *,
+    source_sha256: str | None = None,
     elem_field_metas: list[ElementFieldArtefactMeta] | None = None,
     mesh_edges_filename: str | None = None,
     n_edges: int = 0,
@@ -1768,6 +1769,7 @@ def build_manifest(
     lineage: dict | None = None,
     fem_concepts: dict | None = None,
     groups: list[dict] | None = None,
+    capacity: dict | None = None,
     legacy_glb_url_template: str | None = None,
 ) -> dict:
     """Compose the manifest dict from the bake outputs.
@@ -1994,6 +1996,8 @@ def build_manifest(
         "mesh": mesh_meta,
         "fields": fields_payload,
     }
+    if source_sha256:
+        manifest["source_sha256"] = str(source_sha256)
     if history is not None and (history.regions or history.variables or history.series):
         manifest["history"] = build_history_payload(history)
     if lineage is not None and (lineage.get("assembly_guid") or lineage.get("groups")):
@@ -2008,6 +2012,8 @@ def build_manifest(
     # no ADA_EXT, so the frontend feeds these into useSceneInfoStore directly).
     if groups:
         manifest["groups"] = groups
+    if capacity:
+        manifest["capacity"] = capacity
     if legacy_glb_url_template is not None:
         manifest["legacy_glb"] = {"url_template": legacy_glb_url_template}
     return manifest
@@ -2115,9 +2121,23 @@ def _make_rmed_reader(path: pathlib.Path) -> "FEAStreamReader":
 
 
 def _make_sif_reader(path: pathlib.Path) -> "FEAStreamReader":
-    from ada.fem.formats.sesam.results.read_sif import read_sif_file
+    # Default: the per-step SifStreamReader — peak result RSS stays flat in step
+    # count (one step resident at a time, via the byte-offset index), so a
+    # many-mode deck can't OOM the bake. It streams per *field* (each RV card is
+    # one contiguous block), so it's a single pass, ~+11% wall vs the full
+    # materialise, and it enriches nodal step labels from SESTRA.LIS just like
+    # the adapter. ADA_FEA_SIF_STREAMER=0/false/off forces the full-materialise
+    # adapter (e.g. to rule the streamer out when triaging).
+    import os
 
-    return FEAResultStreamAdapter(read_sif_file(path))
+    if os.environ.get("ADA_FEA_SIF_STREAMER", "").strip().lower() in {"0", "false", "no", "off"}:
+        from ada.fem.formats.sesam.results.read_sif import read_sif_file
+
+        return FEAResultStreamAdapter(read_sif_file(path))
+
+    from ada.fem.formats.sesam.results.sif_stream import SifStreamReader
+
+    return SifStreamReader(path)
 
 
 def _make_sin_reader(path: pathlib.Path) -> "FEAStreamReader":
@@ -2277,6 +2297,7 @@ def bake_fea_artefacts_from_source(
     out_dir: os.PathLike,
     *,
     src_key: str = "",
+    source_sha256: str | None = None,
     legacy_glb_url_template: str | None = None,
 ) -> "BakeResult":
     """End-to-end bake from a source file path. Picks the right
@@ -2292,6 +2313,7 @@ def bake_fea_artefacts_from_source(
             reader,
             out_dir,
             src=src,
+            source_sha256=source_sha256,
             legacy_glb_url_template=legacy_glb_url_template,
         )
 
@@ -2309,9 +2331,11 @@ def bake_artefacts(
     out_dir: os.PathLike,
     *,
     src: str = "",
+    source_sha256: str | None = None,
     legacy_glb_url_template: str | None = None,
     nodal_only: bool = True,
     include_element_fields: bool = True,
+    capacity: dict | None = None,
     on_artefact: Callable[[pathlib.Path], None] | None = None,
 ) -> BakeResult:
     """Drive the streaming bake end-to-end.
@@ -2483,6 +2507,7 @@ def bake_artefacts(
 
     manifest = build_manifest(
         src=src,
+        source_sha256=source_sha256,
         mesh_geom=geom,
         mesh_glb_filename=mesh_glb_path.name,
         field_metas=field_metas,
@@ -2504,6 +2529,7 @@ def bake_artefacts(
         lineage=lineage,
         fem_concepts=fem_concepts,
         groups=groups,
+        capacity=capacity,
         legacy_glb_url_template=legacy_glb_url_template,
     )
     manifest_path = out_dir / "fea.manifest.json"

@@ -810,8 +810,11 @@ def test_make_stream_reader_dispatches_by_extension(fem_files, tmp_path):
 
     sif = fem_files / "sesam/1EL_SHELL_R1.SIF"
     if sif.exists():
+        from ada.fem.formats.sesam.results.sif_stream import SifStreamReader
+
+        # SIF defaults to the memory-bounded streaming reader.
         with make_stream_reader(sif) as r:
-            assert isinstance(r, FEAResultStreamAdapter)
+            assert isinstance(r, SifStreamReader)
 
     with pytest.raises(ValueError, match="no streaming reader"):
         make_stream_reader(tmp_path / "nope.frd")
@@ -999,6 +1002,23 @@ def test_build_manifest_omits_history_when_empty(monkeypatch):
     )
     assert manifest["version"] == MANIFEST_VERSION
     assert "history" not in manifest
+
+
+def test_build_manifest_includes_optional_source_hash():
+    from ada.fem.results.artefacts import MeshGeometry, build_manifest
+
+    geom = MeshGeometry(
+        points=np.zeros((1, 3), dtype=np.float64),
+        cell_blocks=[],
+    )
+    manifest = build_manifest(
+        src="dummy.SIN",
+        source_sha256="abc123",
+        mesh_geom=geom,
+        mesh_glb_filename="fea.mesh.glb",
+        field_metas=[],
+    )
+    assert manifest["source_sha256"] == "abc123"
 
 
 def test_classify_field_by_name():

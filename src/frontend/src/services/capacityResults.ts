@@ -1,0 +1,83 @@
+import type {CapacityResults} from "@/state/capacityResultsStore";
+import type {FeaManifest} from "@/services/viewerApi";
+import {CAPACITY_RESULTS_VERSION} from "@/services/capacityResultsVersion";
+
+export {CAPACITY_RESULTS_VERSION} from "@/services/capacityResultsVersion";
+
+export const CAPACITY_RESULTS_FORMAT = "dnv-rp-c201-capacity-results";
+// v2: stations. v3: [6.4.3] discretization. v4/v5: per-stiffener tributary plates.
+// v6: scalable bundle — the spine keeps only models/catalog/result cases/field
+// metadata; per-element UF values move to AFEL colour blobs (Range-fetched one
+// (field, case) step at a time) and per-(case, model, stiffener) rows move to
+// per-case detail files (capacity.detail/<case>.json, fetched on demand).
+// v7: add the worst-over-cases summary (capacity.summary.json) + trim detail
+// resolved_vectors.
+// v8: per-case detail rows carry check_inputs — the exact geometry/material the
+// check consumed (mm/MPa), used by the input panel + Export so an exported case
+// reproduces the engine (esp. the stiffener span feeding sigma_y,R, eq. (4.6)).
+// v9: beam-column interaction UFs floored at 0 (no negative usage factors).
+// v10: capacity-model topology fix — thickness-gated panel merge, stiffener axial
+// force integrated over the panel's own tributary plate, models keyed by
+// (capacity_model_id, stiffener). Corrects over-reported axial forces/UFs.
+// v11: the bundle gains a second run — the DNV-RP-C201 Section-7 girder check
+// (scope "girder", capacity models of type "girder", g-prefixed case ids so the
+// per-case detail cache never collides with the stiffened-panel run).
+// v12: errored checks are first-class failed rows in per-case detail and compact
+// worst summaries; ERROR takes precedence over every numeric UF.
+// v13: provenance is indexed by row in one lazy file per case; detail rows carry
+// provenance_url + provenance_key instead of pointing at one file per row.
+// v14: the worst-over-cases summary is sharded per case
+// (capacity.summary/<case>.json) behind runs[].worst_summary, replacing the
+// single-file runs[].worst_summary_url; the redundant per-row "k" key is dropped.
+// As one file the stiffened-panel summary hit 908 MB on the full DBSW OPE run,
+// past the V8 ~537 MB max string length, so TextDecoder.decode threw and the
+// worst table silently rendered empty (girders, at 20 MB, kept working).
+// v15: worst-summary rows intern their names. One table per run at
+// runs[].worst_summary.strings; shard rows carry indices (m/s/pg/c/cl/e) with
+// only u/p inline. Run-wide, not per shard, because the repetition is across
+// cases — a stiffener appears on one row per case but in all 84 DBSW shards.
+// The reader also gets one string object per name for the whole run.
+// Kept in lockstep with viewer_export.py.
+export interface CapacityValidationContext {
+    manifest?: Pick<FeaManifest, "source_sha256"> | null;
+}
+
+export function validateCapacityResults(
+    results: CapacityResults,
+    context: CapacityValidationContext = {},
+): void {
+    if (!results || typeof results !== "object") {
+        throw new Error("capacity results must be an object");
+    }
+    if (results.format !== CAPACITY_RESULTS_FORMAT) {
+        throw new Error(`unsupported capacity results format ${String(results.format)}`);
+    }
+    if (results.version !== CAPACITY_RESULTS_VERSION) {
+        throw new Error(`unsupported capacity results version ${String(results.version)}`);
+    }
+    if (!Array.isArray(results.runs) || results.runs.length === 0) {
+        throw new Error("capacity results contain no runs");
+    }
+
+    const manifestHash = normalizeSha256(context.manifest?.source_sha256);
+    const sidecarHash = normalizeSha256(readSidecarSourceHash(results));
+    if (manifestHash && sidecarHash && manifestHash !== sidecarHash) {
+        throw new Error(
+            "capacity results are stale for this source: "
+            + `manifest source_sha256=${manifestHash}, sidecar source.sin_sha256=${sidecarHash}`,
+        );
+    }
+}
+
+function readSidecarSourceHash(results: CapacityResults): string | null {
+    const source = results.source;
+    if (!source || typeof source !== "object") return null;
+    const value = source.sin_sha256;
+    return typeof value === "string" ? value : null;
+}
+
+function normalizeSha256(value: string | null | undefined): string | null {
+    const clean = value?.trim().toLowerCase() ?? "";
+    if (!clean) return null;
+    return clean;
+}

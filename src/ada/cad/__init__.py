@@ -21,10 +21,22 @@ least one backend.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from ada.cad.registry import (  # noqa: E402 - registry is stdlib-only, no ada.cad cycle
+    CadBackendName,
+    CadConfig,
+    StepReader,
+    TessellationPath,
+    available_backends,
+    available_paths,
+    backend_available,
+)
+from ada.config import logger
 
 if TYPE_CHECKING:
     import numpy as np
@@ -34,6 +46,23 @@ if TYPE_CHECKING:
     from ada.geom.direction import Direction
     from ada.geom.points import Point
     from ada.occ.backend import OccBackend  # re-exported at runtime via __getattr__
+
+
+def _circle_param(pt, loc, axis, ref) -> float:
+    """Angular parameter (radians) of ``pt`` on a circle at ``loc`` with normal ``axis``
+    and angular origin ``ref`` — measured from ref about axis, matching OCC's gp_Circ. Used
+    to recover a circular arc's trim extent from its endpoints for the adacpp edge encoder."""
+    ax = [float(x) for x in axis]
+    an = math.sqrt(sum(c * c for c in ax)) or 1.0
+    ax = [c / an for c in ax]
+    r0 = [float(x) for x in ref]
+    dp = sum(r0[i] * ax[i] for i in range(3))
+    r0 = [r0[i] - dp * ax[i] for i in range(3)]  # ref orthogonalised to axis
+    rn = math.sqrt(sum(c * c for c in r0)) or 1.0
+    r0 = [c / rn for c in r0]
+    perp = [ax[1] * r0[2] - ax[2] * r0[1], ax[2] * r0[0] - ax[0] * r0[2], ax[0] * r0[1] - ax[1] * r0[0]]
+    d = [float(pt[i]) - float(loc[i]) for i in range(3)]
+    return math.atan2(sum(d[i] * perp[i] for i in range(3)), sum(d[i] * r0[i] for i in range(3)))
 
 
 class Containment(Enum):
@@ -439,6 +468,33 @@ class AdacppBackend:
                     float(surf.minor_radius),
                     [self._encode_face_bound(fb) for fb in g.bounds],
                 )
+            elif (
+                isinstance(surf, su.SurfaceOfRevolution)
+                and g.bounds
+                and hasattr(self._cad, "build_advanced_face_surface_of_revolution")
+            ):
+                # Revolution AdvancedFace (e.g. Ventilator contoured surfaces): revolve the
+                # generatrix (B-spline meridian) about the axis, trim to bounds. libtess2 covers
+                # this OCC-free; this is the OCC build path for B-rep export (ifc/step).
+                ax = surf.axis_position
+                shape = self._cad.build_advanced_face_surface_of_revolution(
+                    self._xyz(ax.location),
+                    _axis(ax.axis, (0, 0, 1)),
+                    self._encode_generatrix(surf.swept_curve),
+                    [self._encode_face_bound(fb) for fb in g.bounds],
+                )
+            elif (
+                isinstance(surf, su.SurfaceOfLinearExtrusion)
+                and g.bounds
+                and hasattr(self._cad, "build_advanced_face_surface_of_linear_extrusion")
+            ):
+                # Linear-extrusion AdvancedFace: extrude the swept curve along the direction, trim
+                # to bounds. (OCC-free via libtess2's SURF_LIN_EXTRUSION; OCC path for B-rep export.)
+                shape = self._cad.build_advanced_face_surface_of_linear_extrusion(
+                    _axis(surf.extrusion_direction, (0, 0, 1)),
+                    self._encode_generatrix(surf.swept_curve),
+                    [self._encode_face_bound(fb) for fb in g.bounds],
+                )
             elif not isinstance(surf, su.BSplineSurfaceWithKnots):
                 raise NotImplementedError(
                     f"AdacppBackend.build: AdvancedFace surface {type(surf).__name__!r} "
@@ -613,6 +669,47 @@ class AdacppBackend:
             f"AdacppBackend.build: profile curve {type(curve).__name__!r} not yet ported to adacpp."
         )
 
+    def _encode_generatrix(self, curve) -> list[float]:
+        """Encode a bare generatrix/swept curve (the meridian of a SurfaceOfRevolution or
+        the swept curve of a SurfaceOfLinearExtrusion) as a single adacpp curve record
+        (geom_curve_from_record layout). Full/untrimmed — the face bounds trim the surface.
+        B-spline is the STEP case; circle handled too. Mirrors _encode_oriented_edge's curve arms."""
+        import ada.geom.curves as cu
+
+        if isinstance(curve, (cu.BSplineCurveWithKnots, cu.RationalBSplineCurveWithKnots)):
+            poles = [self._xyz(p) for p in curve.control_points_list]
+            knots = [float(k) for k in curve.knots]
+            mults = [float(m) for m in curve.knot_multiplicities]
+            rational = isinstance(curve, cu.RationalBSplineCurveWithKnots)
+            # [kind=3, degree, rational, trim=0, t0, t1, pstart(3), pend(3), n_poles, poles..., n_knots, knots, mults, weights?]
+            rec: list[float] = [
+                3.0,
+                float(curve.degree),
+                1.0 if rational else 0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                float(len(poles)),
+            ]
+            for p in poles:
+                rec += [float(p[0]), float(p[1]), float(p[2])]
+            rec += [float(len(knots))] + knots + mults
+            if rational:
+                rec += [float(w) for w in curve.weights_data]
+            return rec
+        if isinstance(curve, cu.Circle):
+            pos = curve.position
+            return [2.0, *self._xyz(pos.location), *self._xyz(pos.axis), float(curve.radius)]
+        raise NotImplementedError(
+            f"AdacppBackend: surface generatrix {type(curve).__name__!r} not yet ported to adacpp"
+        )
+
     def _encode_oriented_edge(self, oe) -> list[float]:
         """Encode an OrientedEdge / Edge as an adacpp edge record (the layout
         adacpp's edge_from_record consumes). Mirrors OccBackend's
@@ -631,13 +728,29 @@ class AdacppBackend:
         curve = ee.edge_geometry if isinstance(ee, cu.EdgeCurve) else None
 
         if isinstance(curve, cu.Circle):
-            loc, axis = self._xyz(curve.position.location), self._xyz(curve.position.axis)
+            pos = curve.position
+            loc, axis = self._xyz(pos.location), self._xyz(pos.axis)
+            # ref_direction is the circle's angular origin (param 0). It MUST be carried so the
+            # arc/closed-circle vertices land where the adjacent edges (e.g. a cylinder/torus
+            # seam line) attach — without it adacpp placed them at OCC's default x-axis and the
+            # boundary wire wouldn't close ("wire build failed"). Mirrors the Ellipse branch.
+            ref = self._xyz(pos.ref_direction) if pos.ref_direction is not None else [1.0, 0.0, 0.0]
             r = float(curve.radius)
             if closed:
-                return [2.0, *loc, *axis, r]
+                # Full circle: anchor the edge vertex at the start point so a seam connects there.
+                return [2.0, *loc, *axis, *ref, r, *start]
             if has_trim:
-                return [5.0, *loc, *axis, r, float(t_start), float(t_end)]
-            return [0.0, *start, *end]  # no trim params recoverable → chord
+                return [5.0, *loc, *axis, *ref, r, float(t_start), float(t_end)]
+            # No explicit trim: recover the arc's angular extent from the endpoints (CCW from
+            # start to end, matching OccBackend's two-point arc). WITHOUT this the arc collapsed
+            # to a chord ([0, start, end]) → the face lost the surface and BRepMesh tessellated it
+            # flat (a cylinder wall meshed toward its axis). Emitting the real arc keeps the
+            # boundary on the cylinder so the analytic face meshes correctly on the adacpp backend.
+            t0 = _circle_param(start, loc, axis, ref)
+            t1 = _circle_param(end, loc, axis, ref)
+            while t1 <= t0 + 1e-12:
+                t1 += 2.0 * math.pi
+            return [5.0, *loc, *axis, *ref, r, t0, t1]
         if isinstance(curve, cu.Ellipse):
             pos = curve.position
             loc, axis, ref = self._xyz(pos.location), self._xyz(pos.axis), self._xyz(pos.ref_direction)
@@ -674,9 +787,28 @@ class AdacppBackend:
         return [0.0, *start, *end]
 
     @staticmethod
-    def _encode_pcurve(pc) -> list[float]:
+    def _encode_pcurve(
+        pc,
+        t_start: float | None = None,
+        t_end: float | None = None,
+        p_start=None,
+        p_end=None,
+    ) -> list[float]:
         """Encode a Pcurve2dBSpline (2D UV curve on the face surface) as a
-        kind-6 edge record for adacpp.cad.build_advanced_face_bspline."""
+        kind-6 edge record for adacpp.cad.build_advanced_face_bspline.
+
+        ``t_start``/``t_end`` are the owning edge's parametric trim on the
+        underlying curve; ``p_start``/``p_end`` its declared 3D vertices. SAT
+        pcurves typically span the FULL underlying curve, not just the edge's
+        segment — without a trim adacpp built the edge over the whole pcurve,
+        the wire endpoints landed metres apart and the face failed with "wire
+        build failed". The t-params alone aren't enough either: an ACIS bs2
+        pcurve is a fit approximation with its OWN parameterization, so the
+        edge's curve-params land slightly off on the pcurve (cm-scale 3D error
+        on this data). The 3D vertices let adacpp trim geometrically
+        (point → surface UV → pcurve param). Appended as an optional
+        [2.0, t0, t1, sx, sy, sz, ex, ey, ez] tail (flag-detected,
+        back-compatible; flag 1.0 = params-only legacy tail)."""
         cps = pc.control_points_2d
         knots = [float(k) for k in pc.knots]
         mults = [float(m) for m in pc.knot_multiplicities]
@@ -687,19 +819,44 @@ class AdacppBackend:
         rec += [float(len(knots)), *knots, *mults]
         if rational:
             rec += [float(w) for w in pc.weights]
+        if t_start is not None and t_end is not None:
+            if p_start is not None and p_end is not None:
+                rec += [2.0, float(t_start), float(t_end)]
+                rec += [float(c) for c in list(p_start)[:3]] + [float(c) for c in list(p_end)[:3]]
+            else:
+                rec += [1.0, float(t_start), float(t_end)]
         return rec
 
     def _encode_face_bound(self, fb) -> list[list[float]]:
-        """Encode a FaceBound's edge loop: each OrientedEdge with a supplied
-        pcurve → a kind-6 (pcurve-on-surface) record; otherwise its 3D edge."""
+        """Encode a FaceBound's loop as adacpp edge records. An EdgeLoop maps each
+        OrientedEdge (pcurve → kind-6, else its 3D edge); a PolyLoop (a polygon of
+        points — how the analytic flat faces + their hole loops arrive) maps to straight
+        line edges between consecutive points, closing the loop. Without the PolyLoop arm
+        the bound encoded to an EMPTY edge list and build_advanced_face_planar failed the
+        wire build (flat faces-with-holes were unbuildable on the adacpp backend)."""
         import ada.geom.curves as cu
 
         bound = fb.bound
+        if isinstance(bound, cu.PolyLoop):
+            pts = [self._xyz(p) for p in bound.polygon]
+            n = len(pts)
+            return [[0.0, *pts[i], *pts[(i + 1) % n]] for i in range(n)]
         edge_list = bound.edge_list if isinstance(bound, cu.EdgeLoop) else []
         out = []
         for oe in edge_list:
             pc = getattr(oe, "pcurve", None)
-            out.append(self._encode_pcurve(pc) if pc is not None else self._encode_oriented_edge(oe))
+            if pc is not None:
+                out.append(
+                    self._encode_pcurve(
+                        pc,
+                        getattr(oe, "t_start", None),
+                        getattr(oe, "t_end", None),
+                        getattr(oe, "start", None),
+                        getattr(oe, "end", None),
+                    )
+                )
+            else:
+                out.append(self._encode_oriented_edge(oe))
         return out
 
     def make_wire(self, points: "list") -> ShapeHandle:
@@ -752,12 +909,83 @@ class AdacppBackend:
             normals=nrm if nrm.size else None,
         )
 
+    def ifc_taxonomy_settings(self) -> "list[dict]":
+        """Enumerate the ifcopenshell taxonomy ConversionSettings exposed by
+        adacpp as ``[{name, type, default}, ...]`` — for tuning the occ/cgal/
+        hybrid kernels (and for the frontend to render dynamically). Empty when
+        the adacpp build predates the settings interface."""
+        fn = getattr(self._cad, "ifc_taxonomy_settings", None)
+        return list(fn()) if fn is not None else []
+
+    def tessellate_stream(
+        self,
+        items: "list[tuple[str, object]]",
+        pipeline: str = "libtess2",
+        deflection: float = 0.0,
+        angular_deg: float = 20.0,
+        settings: "dict | None" = None,
+        threads: int = 1,
+    ) -> "BatchMesh":
+        """Tessellate a stream of ``(id, ada.geom geometry)`` via adacpp's NGEOM pipeline.
+
+        Serializes the geometry to the NGEOM buffer (the neutral-schema contract — no
+        per-object ``build``/ShapeHandle round-trip) and tessellates it in one C++ call,
+        returning a combined ``BatchMesh`` with a group per input id (``node_id`` = the
+        item's position). ``pipeline``: ``libtess2`` (OCC-free) | ``occ`` | ``cgal``
+        (ifcopenshell taxonomy kernels). ``geometry`` is an ``ada.geom`` ``FaceSurface`` or
+        ``ConnectedFaceSet`` (unmappable items are skipped by the serializer)."""
+        fn = getattr(self._cad, "tessellate_stream", None)
+        if fn is None:
+            raise NotImplementedError(
+                "this adacpp build has no tessellate_stream — rebuild adacpp (feat/libtess2-tessellator)"
+            )
+        import numpy as np
+
+        from ada.cadit.ngeom import serialize_geometries
+
+        buffer = serialize_geometries(items)
+        # ``settings`` overrides the ifcopenshell ConversionSettings for the taxonomy paths
+        # (occ/cgal/hybrid); ignored by libtess2. ``threads`` (>1) parallelises a root's faces
+        # in the libtess2 path — opt-in, so the STEP->GLB process pool (which parallelises across
+        # solids) stays serial per call and doesn't oversubscribe. The signature grew
+        # (settings, then threads); try the fullest form and fall back for older adacpp builds.
+        try:
+            mesh = fn(buffer, pipeline, deflection, angular_deg, dict(settings or {}), int(threads))
+        except TypeError:
+            if int(threads) > 1:
+                logger.debug("adacpp build has no tessellate_stream threads param; running serial")
+            if settings:
+                try:
+                    mesh = fn(buffer, pipeline, deflection, angular_deg, dict(settings))
+                except TypeError:
+                    logger.warning("adacpp build has no taxonomy settings param; ignoring %r", settings)
+                    mesh = fn(buffer, pipeline, deflection, angular_deg)
+            else:
+                mesh = fn(buffer, pipeline, deflection, angular_deg)
+        groups = [
+            MeshGroup(node_id=g.node_id, start=g.start, length=g.length, vstart=g.vstart, vlength=g.vlength)
+            for g in mesh.groups
+        ]
+        nrm = np.asarray(mesh.normals)
+        return BatchMesh(
+            positions=np.asarray(mesh.positions),
+            indices=np.asarray(mesh.indices),
+            groups=groups,
+            normals=nrm if nrm.size else None,
+        )
+
     def bbox(
         self, shape: ShapeHandle, optimal: bool = True, use_mesh: bool = False
     ) -> tuple[float, float, float, float, float, float]:
-        # adacpp.cad.bbox is analytic only; the optimal/use_mesh OCC-accuracy
-        # knobs don't apply and are ignored.
-        return tuple(self._cad.bbox(shape))
+        # adacpp.cad.bbox honors `optimal` (optimal=False = fast loose Add box,
+        # skipping AddOptimal's per-face BSpline refinement — for rough-extent
+        # probes like the empty-body guard). use_mesh doesn't apply (analytic).
+        # Older adacpp builds without the `optimal` param fall back to their
+        # default (tight) box.
+        try:
+            return tuple(self._cad.bbox(shape, optimal=optimal))
+        except TypeError:
+            return tuple(self._cad.bbox(shape))
 
     def obb(self, shape: ShapeHandle) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
         fn = getattr(self._cad, "obb", None)
@@ -802,7 +1030,22 @@ class AdacppBackend:
             raise NotImplementedError("adacpp.cad.boolean is not available in this build")
         return fn(op.value, a, b)
 
+    def _occ_fallback_for(self, shape: ShapeHandle):
+        # A raw pyOCC TopoDS shape (e.g. produced by a STEP/OCC fallback path while adacpp is the active
+        # backend) belongs to a different OCC instance than adacpp's embedded one and can't be passed to
+        # adacpp.cad.* — return the OCC backend to route it through OCC instead. None => an adacpp shape.
+        if not type(shape).__module__.startswith("OCC."):
+            return None
+        if getattr(self, "_occ_bk", None) is None:
+            from ada.occ.backend import OccBackend
+
+            self._occ_bk = OccBackend()
+        return self._occ_bk
+
     def transform(self, shape: ShapeHandle, matrix: "np.ndarray", copy: bool = True) -> ShapeHandle:
+        occ = self._occ_fallback_for(shape)
+        if occ is not None:
+            return occ.transform(shape, matrix, copy)
         fn = getattr(self._cad, "transform", None)
         if fn is None:
             raise NotImplementedError("adacpp.cad.transform is not available in this build")
@@ -842,12 +1085,18 @@ class AdacppBackend:
         return fn(shape)
 
     def shape_type(self, shape: ShapeHandle) -> str:
+        occ = self._occ_fallback_for(shape)
+        if occ is not None:
+            return occ.shape_type(shape)
         fn = getattr(self._cad, "shape_type", None)
         if fn is None:
             raise NotImplementedError("adacpp.cad.shape_type is not available in this build")
         return fn(shape)
 
     def face_surface_type(self, shape: ShapeHandle) -> str:
+        occ = self._occ_fallback_for(shape)
+        if occ is not None:
+            return occ.face_surface_type(shape)
         fn = getattr(self._cad, "face_surface_type", None)
         if fn is None:
             raise NotImplementedError("adacpp.cad.face_surface_type is not available in this build")
@@ -869,6 +1118,9 @@ class AdacppBackend:
         """Decompose a B-spline face handle into an ada.geom AdvancedFace
         (surface + FaceBound/EdgeLoop/OrientedEdge with supplied pcurves) —
         reconstructed from adacpp's AdvancedFaceData. Inverse of build()."""
+        occ = self._occ_fallback_for(shape)
+        if occ is not None:
+            return occ.face_to_advanced_face(shape)
         import ada.geom.curves as cu
         import ada.geom.surfaces as su
         from ada.geom.points import Point
@@ -920,6 +1172,9 @@ class AdacppBackend:
         return su.AdvancedFace(bounds=bounds, face_surface=surface)
 
     def faces(self, shape: ShapeHandle) -> list[ShapeHandle]:
+        occ = self._occ_fallback_for(shape)
+        if occ is not None:
+            return occ.faces(shape)
         fn = getattr(self._cad, "faces", None)
         if fn is None:
             raise NotImplementedError("adacpp.cad.faces is not available in this build")
@@ -1047,6 +1302,9 @@ class AdacppBackend:
         return Point(*fn(shape))
 
     def shells(self, shape: ShapeHandle) -> list[ShapeHandle]:
+        occ = self._occ_fallback_for(shape)
+        if occ is not None:
+            return occ.shells(shape)
         fn = getattr(self._cad, "shells", None)
         if fn is None:
             raise NotImplementedError("adacpp.cad.shells is not available in this build")
@@ -1138,6 +1396,30 @@ def is_shape_handle(obj: Any) -> bool:
     return active_backend().is_handle(obj)
 
 
+def is_cad_body(obj: Any) -> bool:
+    """True if ``obj`` is a pre-built CAD body of ANY available backend, not just the
+    active one.
+
+    A STEP/IFC/SAT reader (the OCC OCAF loader) hands back a pythonocc ``TopoDS_Shape``
+    even when ``ADAPY_CAD_BACKEND=adacpp`` is active. Such a body must still be routed to
+    the transient OCC-body slot (``Shape._occ_cache``), never to ``_geom`` — which must
+    stay an ``ada.geom.Geometry`` / ``None`` (else ``solid_geom()`` does ``self.geom.geometry``
+    on a raw ``TopoDS_Compound`` → ``AttributeError``). ``is_shape_handle`` only checks the
+    active backend, so it misclassifies a cross-backend body; this checks every importable one.
+    """
+    from ada.cad.registry import CadBackendName, backend_available
+
+    for name in (CadBackendName.OCC, CadBackendName.ADACPP):
+        if not backend_available(name):
+            continue
+        try:
+            if select_backend(prefer=name.value).is_handle(obj):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def __getattr__(name: str):
     # Back-compat: OccBackend moved to ada.occ.backend. Re-export it lazily on
     # attribute access so ``from ada.cad import OccBackend`` still works without
@@ -1160,4 +1442,12 @@ __all__ = [
     "is_shape_handle",
     "reset_active_backend",
     "select_backend",
+    # registry / config
+    "CadBackendName",
+    "CadConfig",
+    "StepReader",
+    "TessellationPath",
+    "available_backends",
+    "available_paths",
+    "backend_available",
 ]

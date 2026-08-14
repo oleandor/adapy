@@ -166,6 +166,17 @@ spec:
             - name: ADA_WORKER_EXT_ALLOW
               value: {{ . | join "," | quote }}
             {{- end }}
+            {{- if $w.disableBaseConversions }}
+            # Scope this pool to its own capability only: advertise ZERO base
+            # conversions + base source-ext handling, leaving its capability-routed
+            # utility intact (see worker.py ADA_WORKER_BASE_CONVERSIONS). The clean
+            # alternative to ADA_WORKER_EXT_ALLOW for a pool (e.g. weld-gen) that
+            # needs NO base file work at all — an allowlist can only narrow to a
+            # positive set of suffixes, not to none. Takes effect once the pool runs
+            # an adapy image new enough to read this env.
+            - name: ADA_WORKER_BASE_CONVERSIONS
+              value: "false"
+            {{- end }}
             {{- with $w.convertMemLimitMb }}
             # Per-job RSS ceiling (MB) for the conversion subprocess. The worker
             # SIGKILLs a conversion that exceeds this and fails the job cleanly,
@@ -190,6 +201,33 @@ spec:
           {{- end }}
           {{- with $w.resources }}
           resources: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Liveness: the worker touches /tmp/worker-alive on every JetStream pull-loop iteration
+          # (<=5s when idle) and on conversion progress (~2s). If the pull loop stalls — the durable
+          # consumer wedges after a NATS restart, leaving the pod "Running" but no longer fetching
+          # (num_waiting=0) — the file goes stale and k8s restarts the pod, instead of it sitting
+          # silently broken while jobs pile up unconsumed.
+          #
+          # This heartbeat probe ONLY works on pools running the adapy worker image, which writes the
+          # file. Capability pools that run a foreign image (abaqus, weld-gen) never write it, so the
+          # probe would fail every time and SIGKILL-crashloop them. Hence it is OPT-IN: emitted only
+          # when the pool sets `heartbeatLiveness: true` (the adapy worker default) or supplies its own
+          # `livenessProbe:`. Pools that do neither get no liveness probe.
+          {{- if or $w.livenessProbe $w.heartbeatLiveness }}
+          livenessProbe:
+            {{- with $w.livenessProbe }}
+            {{- toYaml . | nindent 12 }}
+            {{- else }}
+            exec:
+              command:
+                - sh
+                - -c
+                - 'test $(( $(date +%s) - $(stat -c %Y /tmp/worker-alive 2>/dev/null || echo 0) )) -lt 120'
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 4
+            timeoutSeconds: 5
+            {{- end }}
           {{- end }}
           {{- with $w.securityContext }}
           securityContext: {{- toYaml . | nindent 12 }}

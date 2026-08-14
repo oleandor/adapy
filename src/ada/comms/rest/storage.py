@@ -27,21 +27,130 @@ stream plus a `content_encoding` hint, and lets the HTTP layer forward
 from __future__ import annotations
 
 import gzip
+import logging
+import os
 import pathlib
+import shutil
+import subprocess
+import time
 import zlib
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import AsyncIterator
 
 import obstore as obs
+from obstore.exceptions import NotFoundError as _ObstoreNotFound
 from obstore.store import LocalStore, S3Store
 
 from .config import Settings
 from .scope import Scope
 
+logger = logging.getLogger(__name__)
+
 # gzip RFC 1952: every member starts with 0x1F 0x8B. Used as a portable
 # encoding marker that doesn't depend on backend metadata support.
 _GZIP_MAGIC = b"\x1f\x8b"
+
+# pigz emits a *standard* gzip stream (Content-Encoding: gzip compatible) but
+# multi-threaded, so it is a drop-in for the presigned-GET download path while
+# running ~Ncore faster than single-threaded zlib. Resolved once at import.
+_PIGZ = shutil.which("pigz")
+
+
+def _cgroup_cpu_quota() -> int | None:
+    """The pod's CPU limit from its cgroup (CFS quota), or None. k8s CPU *limits* are
+    CFS quota, not cpuset, so ``sched_getaffinity`` would report the whole node and
+    oversubscribe a capped pod. Handles cgroup v2 then v1. Kept local so this low-level
+    storage module needn't import the heavy ``ada.visit`` stack (mirror of the copy in
+    ``scene_from_step_stream``)."""
+    try:  # cgroup v2
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+        if quota != "max" and int(period) > 0:
+            return max(1, round(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    try:  # cgroup v1
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+            quota = int(f.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+            period = int(f.read())
+        if quota > 0 and period > 0:
+            return max(1, round(quota / period))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _gzip_level() -> int:
+    """gzip level for derived-output at-rest compression. Default 6, NOT the zlib/
+    ``gzip.open`` default of 9: on large repetitive ASCII (a multi-GB OBJ/STEP export)
+    level 9 costs ~8x the CPU of level 6 for a <1% smaller file — the level-9 pathology
+    that made the crane STEP->obj job spend ~900 s of its ~1070 s wall in gzip alone.
+    ``ADA_DERIVED_GZIP_LEVEL`` overrides (clamped to 1..9)."""
+    raw = os.environ.get("ADA_DERIVED_GZIP_LEVEL", "").strip()
+    if raw:
+        try:
+            return min(9, max(1, int(raw)))
+        except ValueError:
+            pass
+    return 6
+
+
+def _gzip_threads() -> int:
+    """Thread count for parallel gzip (pigz). ``ADA_DERIVED_GZIP_THREADS`` overrides;
+    otherwise the pod's cgroup CPU limit, falling back to the schedulable CPU count.
+    Bounded to >= 1."""
+    raw = os.environ.get("ADA_DERIVED_GZIP_THREADS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    n = _cgroup_cpu_quota()
+    if n is None:
+        try:
+            n = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            n = os.cpu_count() or 1
+    return max(1, n)
+
+
+def _gzip_file(src: pathlib.Path, dst: pathlib.Path, *, chunk_size: int = 1 << 20) -> None:
+    """Stream-gzip ``src`` into ``dst``.
+
+    Uses ``pigz`` (parallel gzip) when available — it emits a standard gzip stream so
+    the stored object still serves ``Content-Encoding: gzip`` and the browser inflates
+    transparently — at :func:`_gzip_level` across :func:`_gzip_threads` cores. Falls
+    back to single-threaded zlib at the same level when pigz is missing or fails. Either
+    way the payload streams a chunk at a time so neither the plain nor the gzipped bytes
+    are held whole in RAM (the opposite of ``gzip.compress(data)``).
+    """
+    level = _gzip_level()
+    if _PIGZ:
+        threads = _gzip_threads()
+        try:
+            with open(dst, "wb") as fo:
+                proc = subprocess.run(
+                    [_PIGZ, f"-{level}", "-p", str(threads), "-c", str(src)],
+                    stdout=fo,
+                    stderr=subprocess.PIPE,
+                )
+            if proc.returncode == 0:
+                return
+            logger.warning(
+                "pigz exited %s (%s); falling back to single-threaded gzip",
+                proc.returncode,
+                (proc.stderr or b"").decode("utf-8", "replace").strip()[:200],
+            )
+        except OSError as exc:  # pigz vanished between which() and exec, disk full, ...
+            logger.warning("pigz invocation failed (%s); falling back to gzip", exc)
+    with open(src, "rb") as fi, gzip.open(dst, "wb", compresslevel=level) as fo:
+        while True:
+            block = fi.read(chunk_size)
+            if not block:
+                break
+            fo.write(block)
 
 
 @dataclass(frozen=True)
@@ -251,6 +360,103 @@ class Storage:
 
         await obs.put_async(self._store, full, data)
 
+    async def put_path(
+        self,
+        scope: Scope,
+        key: str,
+        src_path: pathlib.Path,
+        *,
+        content_encoding: str | None = None,
+        pre_compressed: bool = False,
+    ) -> dict:
+        """Stream a local file to object storage without buffering it whole.
+
+        The mirror of :meth:`put_bytes` for output that already lives on
+        disk (a conversion writer's tempfile). obstore reads the file and
+        uploads via multipart, so peak RSS stays at the chunk size rather
+        than the full payload — the whole point of this method is to NOT
+        hand a multi-hundred-MB ``bytes`` object to the upload. Used by the
+        worker for large derived outputs (STEP / IFC / GLB) that otherwise
+        get materialised in RAM twice (child read-back + parent buffer).
+
+        ``content_encoding="gzip"``:
+
+        * ``pre_compressed=True`` — the file at ``src_path`` is already
+          gzipped; we just attach the Content-Encoding attribute and stream
+          it up as-is.
+        * ``pre_compressed=False`` — we stream-gzip ``src_path`` into a
+          sibling temp file first (chunked, never the whole payload in RAM),
+          upload that, then delete it. Costs one extra bounded disk pass but
+          keeps the ergonomics identical to ``put_bytes``.
+
+        Returns a timing/size dict — ``{"compress_ms": int | None, "upload_ms": int,
+        "stored_bytes": int}`` — so the worker can record the compression-vs-upload
+        split per conversion in the audit log. ``compress_ms`` is None when no gzip
+        pass ran (plain or ``pre_compressed``).
+        """
+        if content_encoding is not None and content_encoding != "gzip":
+            raise ValueError(f"unsupported content_encoding: {content_encoding!r}")
+
+        full = self._full_key(scope, key)
+        src_path = pathlib.Path(src_path)
+
+        if content_encoding == "gzip" and not pre_compressed:
+            gz_path = src_path.with_name(src_path.name + ".gz")
+            try:
+                t0 = time.monotonic()
+                _gzip_file(src_path, gz_path)
+                compress_ms = round((time.monotonic() - t0) * 1000)
+                stored_bytes = gz_path.stat().st_size
+                t1 = time.monotonic()
+                await self._put_file_stream(full, gz_path, content_encoding="gzip")
+                upload_ms = round((time.monotonic() - t1) * 1000)
+            finally:
+                try:
+                    gz_path.unlink()
+                except OSError:
+                    pass
+            return {"compress_ms": compress_ms, "upload_ms": upload_ms, "stored_bytes": stored_bytes}
+
+        t1 = time.monotonic()
+        await self._put_file_stream(full, src_path, content_encoding=content_encoding)
+        upload_ms = round((time.monotonic() - t1) * 1000)
+        try:
+            stored_bytes = src_path.stat().st_size
+        except OSError:
+            stored_bytes = 0
+        return {"compress_ms": None, "upload_ms": upload_ms, "stored_bytes": stored_bytes}
+
+    async def _put_file_stream(
+        self,
+        full: str,
+        path: pathlib.Path,
+        *,
+        content_encoding: str | None = None,
+    ) -> None:
+        """Multipart-upload a local file at ``full`` (already scope-prefixed).
+
+        Opens the file fresh for each attempt so the LocalStore
+        attribute-unsupported retry doesn't replay a consumed cursor.
+        """
+        if content_encoding is not None:
+            try:
+                with open(path, "rb") as fh:
+                    await obs.put_async(
+                        self._store,
+                        full,
+                        fh,
+                        use_multipart=True,
+                        attributes={"Content-Encoding": content_encoding},
+                    )
+                return
+            except NotImplementedError:
+                # LocalStore has no attribute slot — fall through and write
+                # the bytes plain. The gzip magic header still lets the read
+                # path recognise compressed content.
+                pass
+        with open(path, "rb") as fh:
+            await obs.put_async(self._store, full, fh, use_multipart=True)
+
     async def get_range(self, scope: Scope, key: str, start: int, length: int) -> bytes:
         """Read ``[start, start+length)`` raw bytes of an object — no gzip
         expansion. Only meaningful for objects stored *identity*-encoded;
@@ -370,7 +576,9 @@ class Storage:
             timedelta(seconds=expires_in_seconds),
         )
 
-    async def presigned_get_url(self, scope: Scope, key: str, expires_in_seconds: int = 900) -> str:
+    async def presigned_get_url(
+        self, scope: Scope, key: str, expires_in_seconds: int = 900, *, internal: bool = False
+    ) -> str:
         """Mint a presigned GET URL for direct download from the object
         store. Mirrors ``presigned_put_url`` — same gating, same signing.
 
@@ -379,13 +587,17 @@ class Storage:
         artefacts the CLI/clients should hit the object store directly.
         15-minute default TTL is enough for slow upstream links without
         keeping the URL guessable for long.
+
+        ``internal=True`` signs against the in-cluster store endpoint instead
+        of the public one — for URLs the worker itself consumes (the SIN
+        range-stream read), where the public ingress would be a hairpin.
         """
         if not self.supports_presigned_uploads:
             raise NotImplementedError(
                 "presigned downloads require an HTTP object store; " "LocalStore is not supported"
             )
         return await obs.sign_async(
-            self._presign_store,
+            self._store if internal else self._presign_store,
             "GET",
             self._full_key(scope, key),
             timedelta(seconds=expires_in_seconds),
@@ -424,7 +636,13 @@ class Storage:
         in memory; chunks come off the network, get expanded, and go
         straight to disk.
         """
-        result = await self._store.get_async(self._full_key(scope, key))
+        try:
+            result = await self._store.get_async(self._full_key(scope, key))
+        except _ObstoreNotFound as exc:
+            # Missing key (moved/deleted before the worker fetched it). Surface a
+            # plain FileNotFoundError so callers (the conversion worker) report a
+            # clean "source not found" instead of the raw obstore retry dump.
+            raise FileNotFoundError(f"object not found: {key}") from exc
         chunk_iter = result.stream().__aiter__()
 
         try:
@@ -457,7 +675,10 @@ class Storage:
         compressed bytes are *not* expanded — the caller is expected to
         forward ``Content-Encoding: gzip`` so the browser does that.
         """
-        result = await self._store.get_async(self._full_key(scope, key))
+        try:
+            result = await self._store.get_async(self._full_key(scope, key))
+        except _ObstoreNotFound as exc:
+            raise FileNotFoundError(f"object not found: {key}") from exc
 
         # Some backends populate this from object metadata; treat it as
         # a hint, but fall back to magic-byte sniffing below either way.

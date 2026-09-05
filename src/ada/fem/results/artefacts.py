@@ -2560,7 +2560,23 @@ def _make_fem_reader(path: pathlib.Path) -> "FEAStreamReader":
         else:
             rebuilt.append(b)
     mesh.elements = rebuilt
-    result = FEAResult(name=parts[0].fem.name or path.stem, software="adapy", results=[], mesh=mesh)
+    # What the elements ARE — thickness, material, section — as category
+    # "property" fields, from each element's FemSection. Same fields the Sesam
+    # result reader emits, so Inspect's property colouring works on a design
+    # deck or an exported input deck too. Best-effort decoration: a deck the
+    # builder cannot describe still bakes as a plain mesh.
+    try:
+        from ada.fem.formats.sesam.results.property_fields import (
+            build_property_fields_from_fem,
+        )
+
+        property_fields = build_property_fields_from_fem(parts, part_offsets, mesh)
+    except Exception as e:  # noqa: BLE001
+        from ada.config import get_logger
+
+        get_logger().warning("FEM bake: property fields skipped: %s", e)
+        property_fields = []
+    result = FEAResult(name=parts[0].fem.name or path.stem, software="adapy", results=property_fields, mesh=mesh)
     reader = FEAResultStreamAdapter(result)
     # Scrape FEA input concepts (masses / BCs / load scenarios) so the Scene > FEM panel can
     # draw the glyph overlay. Built from the (intact) assembly — positions are coordinates.

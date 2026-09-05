@@ -76,3 +76,26 @@ def test_properties_ride_the_loaded_step_and_vanish_with_it(fem_files):
     res_none = read_sif_file(fem_files / eigen, step=999)
     assert res_none.get_steps() == []
     assert THICKNESS_FIELD not in _by_name(res_none)
+
+
+def test_design_model_fem_bake_carries_property_fields(fem_files, tmp_path):
+    """A results-less deck read through ada.from_fem gets the same three
+    property fields from each element's FemSection — Inspect's property
+    colouring works on a design deck or an exported input deck, not only on
+    a SIN. Codes are dense (1..N by sorted name); the labels are the point."""
+
+    import json
+
+    from ada.fem.results.artefacts import bake_fea_artefacts_from_source
+
+    out = tmp_path / "bake"
+    bake_fea_artefacts_from_source(fem_files / "sesam/beamMassT1.FEM", out, src_key="fea", include_beam_solids=False)
+    manifest = json.loads((out / "fea.manifest.json").read_text())
+    props = {f["name_canonical"]: f for f in manifest["fields"] if f.get("category") == "property"}
+    assert MATERIAL_FIELD in props and SECTION_FIELD in props, sorted(props)
+    for name in (MATERIAL_FIELD, SECTION_FIELD):
+        labels = props[name].get("value_labels") or {}
+        assert labels, name
+        # Dense codes, printable names.
+        assert all(k.isdigit() and v for k, v in labels.items()), labels
+        assert props[name]["n_steps"] == 1

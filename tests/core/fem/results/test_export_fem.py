@@ -66,3 +66,27 @@ def test_rest_converter_serves_sin_to_fem(fem_files):
     assert data.startswith(b"IDENT")
     assert b"RVNODDIS" not in data and b"RDPOINTS" not in data
     assert b"GELMNT1" in data and b"MISOSEL" in data
+
+
+def test_every_input_record_type_survives_the_export(fem_files):
+    """The drop rule is the ONLY filter: every non-result record type the SIN
+    stores appears in the FEM text — sets, loads, load cases, boundary
+    conditions included, whichever of them a given deck carries."""
+
+    from ada.fem.formats.sesam.results.sin_reader import open_sin
+
+    sin = open_sin(fem_files / _SIN)
+    text = export_fem_text(fem_files / _SIN)
+    emitted = {line.split()[0] for line in text.splitlines() if line and not line[0].isspace()}
+    expected = {name for name in sin.type_blocks if not is_result_record(name)}
+    assert expected <= emitted, sorted(expected - emitted)
+
+
+def test_convert_page_offers_fem_for_a_sin():
+    """The Convert page and the file gallery list targets straight from the
+    registry, so the new cell is exposed there without UI changes."""
+
+    from ada.comms.rest.converter import supported_targets_for
+
+    assert "fem" in supported_targets_for("models/deck.sin")
+    assert "fem" in supported_targets_for("models/DECK.SIN")

@@ -175,3 +175,109 @@ __all__ = [
     "MATERIAL_FIELD",
     "SECTION_FIELD",
 ]
+
+
+def build_property_fields_from_fem(parts, part_offsets, mesh, *, step: int = 1) -> list[ElementFieldData]:
+    """The same three fields for a design-model deck read through ``ada.from_fem``.
+
+    A results-less FEM (an exported input deck, an .inp/.fem/.med design mesh)
+    has no Sesam property tables, but every element carries its ``FemSection``:
+    material, beam section, shell thickness. Materials and sections get dense
+    categorical codes (1..N by sorted name) since there is no deck id to keep —
+    the labels are what a legend shows anyway. ``parts``/``part_offsets`` are
+    what ``concatenate_fem_meshes`` produced ``mesh`` from; element ids in the
+    merged mesh carry each part's element offset.
+    """
+
+    by_offset_id: dict[int, object] = {}
+    for part, (_nid_off, elid_off) in zip(parts, part_offsets):
+        for el in part.fem.elements:
+            by_offset_id[int(el.id) + int(elid_off)] = el
+
+    def _sec(el):
+        return getattr(el, "fem_sec", None)
+
+    material_names = sorted(
+        {
+            getattr(getattr(_sec(el), "material", None), "name", None)
+            for el in by_offset_id.values()
+            if getattr(getattr(_sec(el), "material", None), "name", None)
+        }
+    )
+    section_names = sorted(
+        {
+            getattr(getattr(_sec(el), "section", None), "name", None)
+            for el in by_offset_id.values()
+            if getattr(getattr(_sec(el), "section", None), "name", None)
+        }
+    )
+    material_code = {name: i + 1 for i, name in enumerate(material_names)}
+    section_code = {name: i + 1 for i, name in enumerate(section_names)}
+
+    out: list[ElementFieldData] = []
+    for block in mesh.elements:
+        labels = np.asarray(block.identifiers, dtype=int)
+        if labels.size == 0:
+            continue
+        elem_type = block.elem_info.type
+        is_line = type(elem_type).__name__ == "LineShapes"
+        elems = [by_offset_id.get(int(label)) for label in labels]
+
+        if not is_line:
+            th = np.array(
+                [float(t) if (t := getattr(_sec(el), "thickness", None)) is not None else np.nan for el in elems],
+                dtype=float,
+            )
+            if np.isfinite(th).any():
+                out.append(
+                    _field(step, THICKNESS_FIELD, "TH", elem_type, labels, th, group_label="THICKNESS", unit="m")
+                )
+
+        mats = np.array(
+            [
+                float(material_code.get(getattr(getattr(_sec(el), "material", None), "name", None), np.nan))
+                for el in elems
+            ],
+            dtype=float,
+        )
+        if np.isfinite(mats).any():
+            used = sorted({int(m) for m in mats if np.isfinite(m)})
+            out.append(
+                _field(
+                    step,
+                    MATERIAL_FIELD,
+                    "MATERIAL",
+                    elem_type,
+                    labels,
+                    mats,
+                    group_label="MATERIAL",
+                    value_labels=tuple((float(c), material_names[c - 1]) for c in used),
+                )
+            )
+
+        if is_line:
+            secs = np.array(
+                [
+                    float(section_code.get(getattr(getattr(_sec(el), "section", None), "name", None), np.nan))
+                    for el in elems
+                ],
+                dtype=float,
+            )
+            if np.isfinite(secs).any():
+                used = sorted({int(s) for s in secs if np.isfinite(s)})
+                out.append(
+                    _field(
+                        step,
+                        SECTION_FIELD,
+                        "SECTION",
+                        elem_type,
+                        labels,
+                        secs,
+                        group_label="SECTION",
+                        value_labels=tuple((float(c), section_names[c - 1]) for c in used),
+                    )
+                )
+    return out
+
+
+__all__.append("build_property_fields_from_fem")

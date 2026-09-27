@@ -6,12 +6,15 @@ kind of guard that rots unquestioned if nothing runs it: the package is driven b
 command line, and a comparator that has quietly stopped discriminating still prints a table full of
 numbers. So the suite runs them.
 
-Nine groups: four for the portal frame and five for the plate strip. The plate groups carry the
-measured output of twelve real solves (Sestra ``FQUS`` and Abaqus ``S4R``, three mesh densities,
-bare and stiffened), which is what makes ``plate_compare.PLATE_REL_TOL`` checkable here without a
-solver -- including the check that the *coarsest* mesh pair would fail it, so the tolerance cannot
-quietly be loosened until a single-mesh comparison passes. One of them emits the plate's CAE script
-and asserts the writer's own supports in it, which needs the writer but no licence.
+Thirteen groups: four for the portal frame, five for the plate strip and four for the curved
+panel. The plate groups carry the measured output of twelve real solves (Sestra ``FQUS`` and Abaqus
+``S4R``, three mesh densities, bare and stiffened) and the curved groups of six more, which is what
+makes ``plate_compare.PLATE_REL_TOL`` and ``curved_compare.CURVED_REL_TOL`` checkable here without
+a solver -- including the check, on both cases, that the *coarsest* mesh pair would fail the
+tolerance, so it cannot quietly be loosened until a single-mesh comparison passes. Two of them emit
+a CAE script and assert the writer's own supports, regions and pressure in it, which needs the
+writer but no licence; the curved one also reproduces, through the writer's own planner, the
+pressure-resultant defect that case turned up.
 
 Each group is its own test so a failure names the part that broke, and the group's printed output
 (captured by pytest) is the report: every check appears as PASS or FAIL with the numbers beside it.
@@ -34,8 +37,8 @@ if str(ROOT_DIR) not in sys.path:
 #: is caught, which is the failure mode that matters for a set of guards. Raise it when the real
 #: count moves up. 109 when the plate case's Abaqus supports came from a driver of its own; 116
 #: once adapy PR #405 moved them into the writer and the driver's checks were replaced by checks on
-#: the writer's emitted regions.
-MINIMUM_CHECKS = 116
+#: the writer's emitted regions; 211 with the curved panel's four groups.
+MINIMUM_CHECKS = 211
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +58,10 @@ def selftest():
         "check_plate_agreement",
         "check_plate_boundary_semantics",
         "check_plate_loud_failures",
+        "check_curved_closed_forms",
+        "check_curved_convergence",
+        "check_curved_boundary_semantics",
+        "check_curved_loud_failures",
     ],
 )
 def test_the_comparison_framework_checks_itself(selftest, group):
@@ -76,6 +83,10 @@ def test_no_check_has_quietly_disappeared(selftest):
         + len(selftest.check_plate_agreement())
         + len(selftest.check_plate_boundary_semantics())
         + len(selftest.check_plate_loud_failures())
+        + len(selftest.check_curved_closed_forms())
+        + len(selftest.check_curved_convergence())
+        + len(selftest.check_curved_boundary_semantics())
+        + len(selftest.check_curved_loud_failures())
     )
 
     assert total >= MINIMUM_CHECKS, f"only {total} checks remain; MINIMUM_CHECKS is {MINIMUM_CHECKS}"

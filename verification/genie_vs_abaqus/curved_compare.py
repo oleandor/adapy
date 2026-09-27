@@ -546,8 +546,17 @@ def assert_axial_contraction(
             f"table holds {sorted(table.displacements)}."
         )
     slope = math.fsum(fitted) / len(fitted)
-    worst_nonlinear = max(abs(value / slope - 1.0) for value in fitted)
     relative = abs(slope / strain - 1.0)
+    if abs(slope) <= abs(strain) * rel_tol:
+        # u_z held everywhere. Checked before the nonlinearity, which would divide by this slope --
+        # and reported as the restraint it is rather than as a division error.
+        raise AxialRestraintPresent(
+            f"{table.solver}: the axial strain measured over {len(fitted)} probe(s) is {slope:.9e}, "
+            f"i.e. zero to within {rel_tol:.1e} of -nu p r / (E t) = {strain:.9e}. An open-ended "
+            f"cylinder contracts axially by exactly that, so u_z pinned at zero everywhere means the "
+            f"axial direction is restrained along the panel and not only at the one reference node."
+        )
+    worst_nonlinear = max(abs(value / slope - 1.0) for value in fitted)
     if relative > rel_tol:
         raise AxialRestraintPresent(
             f"{table.solver}: the axial strain measured over {len(fitted)} probe(s) is {slope:.9e} and "

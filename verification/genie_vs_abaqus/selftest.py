@@ -45,13 +45,43 @@ against multiples of itself. That last distinction is why
 :data:`plate_compare.PLATE_REL_TOL`: it is what says the extrapolation is doing the work and the
 tolerance is not merely generous.
 
-Run it after any change to :mod:`compare`, :mod:`displacements` or the plate modules::
+And the **curved** case adds four more (:func:`check_curved_closed_forms`,
+:func:`check_curved_convergence`, :func:`check_curved_boundary_semantics`,
+:func:`check_curved_loud_failures`), because a *non-planar* plate goes wrong in ways a flat one
+cannot:
+
+* an internal pressure that **contracts** the shell -- the one failure a curved face makes
+  possible and a flat plate does not, because "outward" is a direction that turns along the
+  surface. A flipped face normal, a positive ``*Dsload`` magnitude or one facet whose node
+  ordering reversed all give a perfectly converged, perfectly equilibrated answer of the wrong
+  sign;
+* a **symmetry dof dropped** from either generator, which leaves a model that still solves, still
+  reacts the whole pressure, and is no longer a quarter of a cylinder;
+* a curved plate that **meshed to fewer shells than expected**, whose chord error is then not the
+  one its place in the refinement sequence assumes -- plus the three geometric clauses that say
+  the grid is a faceted cylinder at all: nodes off radius ``r``, a warped facet, and a facet
+  normal pointing at the axis;
+* an axial restraint that was not released, in three independent forms: ``u_z`` held everywhere,
+  ``u_z`` non-zero at the reference plane, and ``u_z`` not linear in ``z``;
+* a reaction that is half the load, has the same sign as the load, or has a non-zero axial
+  component -- an open-ended cylinder reacts nothing in ``z``;
+* and the **premise the whole case rests on**: adapy cannot mesh a ``PlateCurved``, so this
+  package builds its own analytic grid, and the day that stops being true the guard says so rather
+  than leaving a second quiet opinion about the mesh in place.
+
+The curved groups carry the measured output of **six** real solves (``_CURVED_SESTRA`` ..
+``_CURVED_CROSS_SOLVER``) and assert the writer defect the case turned up --
+``AnalysisPlan.applied_pressure`` is 15.4% wrong and 7.6% asymmetric on a quarter cylinder --
+through the writer's own planner, so that check stops passing the day the writer is fixed.
+
+Run it after any change to :mod:`compare`, :mod:`displacements` or the plate and curved modules::
 
     python -m verification.genie_vs_abaqus.selftest
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import pathlib
 import re
@@ -1546,6 +1576,1142 @@ def check_plate_loud_failures() -> list[bool]:
     return results
 
 
+# --- the curved case -------------------------------------------------------------------------
+#
+# Measured, on this branch, at the three grids of curved_model.MESH_COUNTS: Sestra V11.3-00
+# (FQUS, 64 / 256 / 1024 elements) against Abaqus 2025 (S4R, the same counts on the same
+# structured grid, 81 / 289 / 1089 nodes both sides). The two tables below are the *Richardson
+# extrapolants* of those three solves, per probe, and only the three components that carry
+# signal: u1, u2 and u3. The rotations are zero by construction -- a pure membrane hoop state
+# has no bending anywhere -- and were measured at 5.3e-10 (Sestra) and 3.5e-08 (Abaqus), both
+# far below compare.ABS_FLOOR. They are carried as 0.0 here and still compared, by compare's
+# absolute rule.
+#
+# Read the two tables side by side at T0 and T90: Sestra's are *identical* mirror images
+# (T0_MID.u1 == T90_MID.u2 to the last digit) and Abaqus' are not. That asymmetry is the whole
+# of this case's cross-solver residual, and it is an S4R property rather than a translation
+# defect -- see step 3 of curved_compare's docstring for the measurement that settles it.
+
+_CURVED_SESTRA = {
+    "T0_Z0": (0.000190476989212573, 0.0, 0.0),
+    "T0_Q": (0.000190476881806862, 0.0, -2.2439955508728e-05),
+    "T0_MID": (0.000190476856224673, 0.0, -4.4879911017457e-05),
+    "T0_3Q": (0.000190476883352593, 0.0, -6.731985681997e-05),
+    "T0_ZL": (0.000190476976631253, 0.0, -8.9759822034914e-05),
+    "T90_Z0": (0.0, 0.000190476989212573, -1.5602e-14),
+    "T90_Q": (0.0, 0.000190476881806862, -2.2439955508728e-05),
+    "T90_MID": (0.0, 0.000190476856224673, -4.4879911017457e-05),
+    "T90_3Q": (0.0, 0.000190476883352593, -6.731985681997e-05),
+    "T90_ZL": (0.0, 0.000190476976631253, -8.9759822034914e-05),
+    "ARC0_MID": (0.000134688712527243, 0.000134688712527243, -3.07636e-13),
+    "ARCL_MID": (0.000134688712527243, 0.000134688712527243, -8.9759822845121e-05),
+}
+
+_CURVED_ABAQUS = {
+    "T0_Z0": (0.000190499374429798, 0.0, -0.0),
+    "T0_Q": (0.000190477403385621, 0.0, -2.2440046134648e-05),
+    "T0_MID": (0.000190460151919407, 0.0, -4.4880055999935e-05),
+    "T0_3Q": (0.000190452197980589, 0.0, -6.7320017706179e-05),
+    "T0_ZL": (0.000190457146184144, 0.0, -8.9760102664641e-05),
+    "T90_Z0": (0.0, 0.000190530045094939, -2.539290378e-08),
+    "T90_Q": (0.0, 0.000190526397820213, -2.2462073612874e-05),
+    "T90_MID": (0.0, 0.000190529757134511, -4.4900568323265e-05),
+    "T90_3Q": (0.0, 0.000190532342615437, -6.7339593255515e-05),
+    "T90_ZL": (0.0, 0.000190535686388942, -8.9778993149868e-05),
+    "ARC0_MID": (0.000134682602994648, 0.000134675563265381, -1.2858145659e-08),
+    "ARCL_MID": (0.000134663540398779, 0.000134699953879219, -8.976938276247e-05),
+}
+
+#: Radial displacement at ``T0_MID`` at 8 / 16 / 32 elements a side, coarse to fine, and the
+#: axial ``u3`` at ``T0_ZL`` over the same three. The sequences the orders and the extrapolants
+#: are read off, at full precision so the arithmetic in :mod:`plate_hand_check` is checked
+#: against the numbers the tolerances were budgeted from.
+_CURVED_RADIAL_SEQUENCES = {
+    "sestra": (0.00018955643463414162, 0.00019025063375011086, 0.00019042125495616347),
+    "abaqus": (0.00018967386859003454, 0.00019026704831048846, 0.00019041272753383964),
+}
+_CURVED_AXIAL_SEQUENCES = {
+    "sestra": (-8.932757191359997e-05, -8.965167216956615e-05, -8.973276271717623e-05),
+    "abaqus": (-8.932747732615098e-05, -8.965176675701514e-05, -8.973297371994704e-05),
+}
+
+#: The hoop-uniformity spread at the three grids and then on the extrapolant, per solver, and the
+#: observed-order range over each solver's 23 significant components. All measured; these are the
+#: numbers :data:`curved_hand_check.HOOP_REL_TOL` and
+#: :data:`curved_compare.CURVED_ORDER_BAND` are set from.
+_CURVED_HOOP_SPREAD = {
+    "sestra": (4.5184706917136475e-05, 3.0538398152807766e-05, 1.2984411685847413e-05, 9.175465849968875e-06),
+    "abaqus": (0.0013246599028147988, 0.00032910002958305636, 0.00011255843410357026, 0.0003653246408884538),
+}
+_CURVED_ORDER_RANGE = {
+    "sestra": (1.966416317312324, 2.024552561460075),
+    "abaqus": (1.457047966478184, 2.9551043963215875),
+}
+
+#: The measured cross-solver residuals, so the tolerance can be pinned against them absolutely.
+#: All three are ``T90_Q.u3``, which is the probe the S4R asymmetry hits hardest.
+_CURVED_CROSS_SOLVER = {
+    "extrapolated": 0.0009846866556865203,
+    "finest": 0.0011330901441648652,
+    "coarsest": 0.0034215768429777483,
+}
+
+#: Each solver's own summed reaction at the finest grid, newtons. Against
+#: ``(-p r L, -p r L, 0) = (-628318.530718, -628318.530718, 0)``.
+_CURVED_REACTIONS = {
+    "sestra": (-628318.529296875, -628318.529296875, 5.255969881545752e-09),
+    "abaqus": (-628318.546875, -628318.548828125, 0.003337685950100422),
+}
+
+#: What ``AnalysisPlan.applied_pressure`` computes for this panel, and the exact resultant. The
+#: defect gap 2 of :mod:`curved_model` reports, carried here so it is checked without a licence.
+_CURVED_WRITER_PRESSURE = (724863.7521754879, 669823.4477113917, 0.0)
+_CURVED_EXACT_PRESSURE = (628318.5307179586, 628318.5307179586, 0.0)
+
+
+def _curved_table(solver: str, values: dict) -> DisplacementTable:
+    """A :class:`DisplacementTable` from ``{probe: (u1, u2, u3)}``, zero rotations."""
+    from . import curved_model, curved_sestra_runner
+
+    return DisplacementTable(
+        solver=solver,
+        solver_version="selftest",
+        model=curved_sestra_runner.model_name(),
+        load_case=curved_model.LOAD_CASE,
+        displacements={name: (u1, u2, u3, 0.0, 0.0, 0.0) for name, (u1, u2, u3) in values.items()},
+        node_ids={name: index for index, name in enumerate(sorted(values), start=1)},
+        source=f"selftest::curved::{solver}",
+    )
+
+
+def _curved_solve(table: DisplacementTable, *, count: int, reaction=None):
+    """A :class:`plate_sestra_runner.PlateSolve` around a curved table, with the right reaction."""
+    from . import curved_model, plate_sestra_runner
+
+    if reaction is None:
+        reaction = tuple(-v for v in curved_model.expected_load_total())
+    return plate_sestra_runner.PlateSolve(
+        table=table,
+        mesh_size=curved_model.PANEL_ARC / count,
+        stiffened=False,
+        reaction_total=tuple(float(v) for v in reaction),
+        node_count=0,
+        element_counts={},
+        source=table.source,
+    )
+
+
+def _curved_sequence(solver: str, *, counts=None) -> list:
+    """The three measured solves for one solver, coarse to fine.
+
+    The **two** components whose sequences are carried in full -- the radial at
+    ``T0_MID``/``T90_MID`` and the axial ``u3`` at ``T0_ZL`` -- take their measured values. Every
+    other component is given the *same relative* sequence as the radial one, scaled onto its own
+    extrapolated value.
+
+    That is not padding, and the reason is arithmetic: Richardson is an affine combination of the
+    three values, so a component whose sequence is ``V (1 + d_i)`` with ``d`` the radial sequence's
+    own relative approach extrapolates to exactly ``V``. So this reconstruction reproduces the
+    measured extrapolated table component for component, and every component forms a genuine
+    converging sequence -- which the alternative (holding the minor components constant) does not:
+    three identical values have no rate to read and :func:`plate_hand_check.observed_order` refuses
+    them by name, which is how this shape announced itself.
+    """
+    from . import curved_model
+
+    reference = {"sestra": _CURVED_SESTRA, "abaqus": _CURVED_ABAQUS}[solver]
+    radial = _CURVED_RADIAL_SEQUENCES[solver]
+    axial = _CURVED_AXIAL_SEQUENCES[solver]
+    limit = reference["T0_MID"][0]
+    counts = curved_model.MESH_COUNTS if counts is None else counts
+    solves = []
+    for count, radial_value, axial_value in zip(counts, radial, axial):
+        factor = radial_value / limit
+        values = {name: tuple(v * factor for v in row) for name, row in reference.items()}
+        values["T0_MID"] = (radial_value, 0.0, values["T0_MID"][2])
+        values["T90_MID"] = (0.0, radial_value, values["T90_MID"][2])
+        values["T0_ZL"] = (values["T0_ZL"][0], 0.0, axial_value)
+        solves.append(_curved_solve(_curved_table(solver, values), count=count))
+    return solves
+
+
+def check_curved_closed_forms() -> list[bool]:
+    """The curved case's closed forms and its grid, against independent statements.
+
+    Every check here is an identity or a limit computed from the literals of the problem rather
+    than from the functions being checked -- which is what makes this something other than the
+    code agreeing with itself.
+    """
+    print("\ncurved closed forms and the analytic grid:")
+    from . import curved_compare as ccmp
+    from . import curved_hand_check as chc
+    from . import curved_model as cvm
+
+    results = []
+    E, nu = 2.1e11, 0.3
+    r, length, thickness, pressure = 2.0, math.pi, 0.010, 1.0e5
+
+    props = cvm.section_properties()
+    results.append(
+        _expect(
+            "the model's material is S355 at E = 210 GPa and nu = 0.3, read off adapy and not retyped",
+            props["E"] == E and props["nu"] == nu,
+            f"E={props['E']:.6g}, nu={props['nu']}",
+        )
+    )
+    results.append(
+        _expect(
+            "the axial length is the quarter arc's own length, pi r / 2 -- which is what puts one "
+            "seed on both directions",
+            abs(cvm.PANEL_LENGTH - 0.5 * math.pi * cvm.PANEL_RADIUS) < 1e-15 and abs(cvm.PANEL_LENGTH - length) < 1e-15,
+            f"L={cvm.PANEL_LENGTH!r}, pi r / 2={0.5 * math.pi * cvm.PANEL_RADIUS!r}",
+        )
+    )
+    results.append(
+        _expect(
+            "w = p r^2 / (E t), computed from the literals of the problem",
+            abs(chc.radial_displacement() - pressure * r * r / (E * thickness)) < 1e-18,
+            f"{chc.radial_displacement():.12e} against {pressure * r * r / (E * thickness):.12e}",
+        )
+    )
+    results.append(
+        _expect(
+            "and w carries NO nu -- the ends are open, so sigma_z = 0 and nothing is subtracted",
+            abs(chc.radial_displacement() * (1.0 - nu**2) / chc.radial_displacement() - (1.0 - nu**2)) < 1e-15
+            and abs(chc.radial_displacement() - pressure * r * r / (E * thickness)) < 1e-18,
+            f"a 1 - nu^2 would make it {pressure * r * r / (E * thickness) * (1 - nu**2):.12e}, 9% away",
+        )
+    )
+    results.append(
+        _expect(
+            "the hoop stress is p r / t, and w / r is exactly that over E -- so the radial check is "
+            "the hoop-stress check with a modulus in it",
+            abs(chc.hoop_stress() - pressure * r / thickness) < 1e-6
+            and abs(chc.radial_displacement() / r - chc.hoop_stress() / E) < 1e-18,
+            f"sigma_theta={chc.hoop_stress():.6g} Pa, w/r={chc.radial_displacement() / r:.12e}",
+        )
+    )
+    results.append(
+        _expect(
+            "the axial strain is -nu p r / (E t) -- negative, so an internally pressurised open "
+            "cylinder gets SHORTER as it swells",
+            abs(chc.axial_strain() + nu * pressure * r / (E * thickness)) < 1e-18 and chc.axial_strain() < 0.0,
+            f"{chc.axial_strain():.12e}",
+        )
+    )
+    results.append(
+        _expect(
+            "the axial displacement is linear in z and zero at z = 0",
+            chc.axial_displacement(0.0) == 0.0
+            and abs(chc.axial_displacement(length) - 2.0 * chc.axial_displacement(0.5 * length)) < 1e-20,
+            f"u_z(L)={chc.axial_displacement(length):.12e}, 2 u_z(L/2)="
+            f"{2 * chc.axial_displacement(0.5 * length):.12e}",
+        )
+    )
+    # The edge reaction, derived a second way: integral(p sin(theta) r L dtheta) over 0..pi/2 by
+    # quadrature rather than by the antiderivative the closed form used.
+    steps = 200_000
+    quadrature = math.fsum(
+        pressure * math.sin((index + 0.5) * 0.5 * math.pi / steps) * r * length * (0.5 * math.pi / steps)
+        for index in range(steps)
+    )
+    results.append(
+        _expect(
+            "the edge reaction p r L is integral(p n_y dA) over the quarter, by quadrature",
+            abs(chc.edge_reaction() / quadrature - 1.0) < 1e-09,
+            f"{chc.edge_reaction():.6f} against {quadrature:.6f}, rel {abs(chc.edge_reaction() / quadrature - 1.0):.3e}",
+        )
+    )
+    results.append(
+        _expect(
+            "the face area is pi r L / 2, and the inscribed polygon's is always BELOW it, " "approaching as O(h^2)",
+            abs(cvm.face_area() - 0.5 * math.pi * r * length) < 1e-12
+            and all(chc.faceted_area(n) < cvm.face_area() for n in cvm.MESH_COUNTS)
+            and abs((cvm.face_area() - chc.faceted_area(8)) / (cvm.face_area() - chc.faceted_area(16)) - 4.0) < 0.02,
+            f"exact {cvm.face_area():.9f}, faceted "
+            f"{[round(chc.faceted_area(n), 9) for n in cvm.MESH_COUNTS]}, deficit ratio "
+            f"{(cvm.face_area() - chc.faceted_area(8)) / (cvm.face_area() - chc.faceted_area(16)):.4f}",
+        )
+    )
+    # Every probe's exact displacement, component by component, against the two closed forms.
+    expected = {p.name: chc.expected_components(p.name) for p in cvm.PROBE_POINTS}
+    radial_ok = all(
+        abs(math.hypot(expected[name]["u1"], expected[name]["u2"]) / chc.radial_displacement() - 1.0) < 1e-12
+        for name in expected
+    )
+    axial_ok = all(abs(expected[p.name]["u3"] - chc.axial_displacement(p.xyz[2])) < 1e-20 for p in cvm.PROBE_POINTS)
+    rotations_ok = all(expected[name][c] == 0.0 for name in expected for c in ("r1", "r2", "r3"))
+    results.append(
+        _expect(
+            f"all {len(expected)} probes have an exact displacement: |(u1, u2)| = w, u3 = the axial "
+            f"form, and every rotation exactly zero",
+            radial_ok and axial_ok and rotations_ok,
+            f"radial {radial_ok}, axial {axial_ok}, rotations {rotations_ok}",
+        )
+    )
+    results.append(
+        _expect(
+            "at theta = 45 the radial displacement is split between u1 and u2, so reading u1 alone "
+            "would be 29% low -- which is why RADIAL_BASIS is data",
+            abs(expected["ARC0_MID"]["u1"] / chc.radial_displacement() - math.cos(math.radians(45))) < 1e-12
+            and abs(expected["ARC0_MID"]["u1"] / chc.radial_displacement() - 1.0) > 0.29,
+            f"u1/w = {expected['ARC0_MID']['u1'] / chc.radial_displacement():.9f}",
+        )
+    )
+
+    # The grid. Every clause of assert_shell_grid, measured positively on the real thing.
+    for count in cvm.MESH_COUNTS:
+        grid, nodes = cvm.shell_grid(count)
+        radii = [math.hypot(node.x, node.y) for node in nodes]
+        results.append(
+            _expect(
+                f"the {count} x {count} grid has ({count} + 1)^2 nodes, all on radius r to 1e-15",
+                len(nodes) == (count + 1) ** 2 and max(abs(v - r) for v in radii) < 1e-15,
+                f"{len(nodes)} nodes, worst radius error {max(abs(v - r) for v in radii):.3e}",
+            )
+        )
+    # ... and the facets are exact rectangles, which is what makes the nodal load exact.
+    assembly = cvm.build_panel(cvm.MESH_COUNTS[0], route="sestra")
+    fem = _curved_part(assembly).fem
+    worst_area, worst_dot = 0.0, 0.0
+    for element in cvm.shell_elements(fem):
+        points = [np.asarray(node.p, dtype=float) for node in element.nodes]
+        e1, e2 = points[1] - points[0], points[3] - points[0]
+        worst_dot = max(worst_dot, abs(float(np.dot(e1, e2))))
+        worst_area = max(
+            worst_area,
+            abs(cvm.element_area(element) - float(np.linalg.norm(e1)) * float(np.linalg.norm(e2))),
+        )
+    results.append(
+        _expect(
+            "every facet is a RECTANGLE -- its two edge vectors are orthogonal and its area is "
+            "their product -- which is what makes integral(N_i) dA = A / 4 exact",
+            worst_dot < 1e-15 and worst_area < 1e-15,
+            f"worst edge dot product {worst_dot:.3e}, worst area mismatch {worst_area:.3e}",
+        )
+    )
+    groups = cvm.consistent_nodal_loads(fem)
+    total = cvm.applied_load_total(groups)
+    results.append(
+        _expect(
+            "the consistent nodal loads sum to exactly (p r L, p r L, 0) -- the closed form, not a "
+            "lumping of the pressure",
+            all(
+                abs(total[axis] / v - 1.0) < 1e-12 if v else abs(total[axis]) < 1e-06
+                for axis, v in enumerate(cvm.expected_load_total())
+            ),
+            f"{tuple(round(v, 6) for v in total)} against {cvm.expected_load_total()} over "
+            f"{len(groups)} distinct vector(s)",
+        )
+    )
+    results.append(
+        _expect(
+            "every facet normal points AWAY from the cylinder axis, so the internal pressure pushes "
+            "outward on all of them",
+            all(
+                float(
+                    np.dot(
+                        cvm.element_normal(element),
+                        np.asarray(
+                            [
+                                np.mean([n.p[0] for n in element.nodes]),
+                                np.mean([n.p[1] for n in element.nodes]),
+                                0.0,
+                            ]
+                        ),
+                    )
+                )
+                > 0.0
+                for element in cvm.shell_elements(fem)
+            ),
+            f"{len(cvm.shell_elements(fem))} facet(s)",
+        )
+    )
+    results.append(
+        _expect(
+            "the probe-match tolerance is 1e-05 and the hoop node spacing at the FINEST grid is "
+            "0.098 m, so it is 4 orders below the nearest node it could confuse a probe with",
+            cvm.PROBE_MATCH_TOL == 1.0e-05
+            and 2.0 * r * math.sin(0.25 * math.pi / cvm.MESH_COUNTS[-1]) / cvm.PROBE_MATCH_TOL > 1000.0,
+            f"tol {cvm.PROBE_MATCH_TOL:.1e}, spacing "
+            f"{2.0 * r * math.sin(0.25 * math.pi / cvm.MESH_COUNTS[-1]):.6f} m",
+        )
+    )
+    results.append(
+        _expect(
+            "the writer's flat-plate pressure resultant is WRONG on this face, and asymmetric where "
+            "the panel is symmetric -- the defect this case reports",
+            abs(_CURVED_WRITER_PRESSURE[0] / _CURVED_EXACT_PRESSURE[0] - 1.0) > 0.15
+            and abs(_CURVED_WRITER_PRESSURE[0] - _CURVED_WRITER_PRESSURE[1]) > 0.07 * _CURVED_WRITER_PRESSURE[0]
+            and _CURVED_EXACT_PRESSURE[0] == _CURVED_EXACT_PRESSURE[1],
+            f"writer {_CURVED_WRITER_PRESSURE[:2]} against exact {_CURVED_EXACT_PRESSURE[:2]}",
+        )
+    )
+    results.append(
+        _expect(
+            "the curved order band is wider than the plate's, and both measured ranges sit inside it",
+            ccmp.CURVED_ORDER_BAND[0] < plate_hand_check_order_band()[0]
+            and ccmp.CURVED_ORDER_BAND[1] > plate_hand_check_order_band()[1]
+            and all(
+                ccmp.CURVED_ORDER_BAND[0] <= low and high <= ccmp.CURVED_ORDER_BAND[1]
+                for low, high in _CURVED_ORDER_RANGE.values()
+            ),
+            f"{ccmp.CURVED_ORDER_BAND} against measured {_CURVED_ORDER_RANGE}",
+        )
+    )
+    return results
+
+
+def plate_hand_check_order_band():
+    from . import plate_hand_check
+
+    return plate_hand_check.ORDER_BAND
+
+
+def _curved_part(assembly):
+    from . import curved_model
+
+    for part in assembly.get_all_parts_in_assembly(include_self=True):
+        if part.name == curved_model.PART_NAME:
+            return part
+    raise AssertionError("the curved assembly holds no Panel part")
+
+
+def check_curved_convergence() -> list[bool]:
+    """The measured sequences, their orders, their extrapolants, and the tolerance they set.
+
+    Everything here is arithmetic on the twelve real solves whose numbers are the constants above,
+    so it runs with no solver and still pins :data:`curved_compare.CURVED_REL_TOL` against the
+    residual a correct translation actually leaves -- not merely against a multiple of itself.
+    """
+    print("\ncurved convergence and the tolerance it sets:")
+    from . import compare as cmp_mod
+    from . import curved_compare as ccmp
+    from . import curved_hand_check as chc
+    from . import curved_model as cvm
+
+    results = []
+    closed_radial = chc.radial_displacement()
+    closed_axial = chc.axial_displacement(cvm.PANEL_LENGTH)
+    extrapolants = {}
+    for solver in ("abaqus", "sestra"):
+        sequence = _CURVED_RADIAL_SEQUENCES[solver]
+        residuals = [abs(v / closed_radial - 1.0) for v in sequence]
+        results.append(
+            _expect(
+                f"{solver}: the radial sequence approaches the closed form monotonically from BELOW "
+                f"-- a polygon inscribed in the cylinder is stiffer in hoop than the cylinder",
+                all(v < closed_radial for v in sequence) and residuals[0] > residuals[1] > residuals[2],
+                f"rel {[f'{v:.3e}' for v in residuals]}",
+            )
+        )
+        conv = chc.richardson(sequence, order_band=ccmp.CURVED_ORDER_BAND)
+        extrapolants[solver] = conv.extrapolated
+        results.append(
+            _expect(
+                f"{solver}: the radial order is 2.02, measured off the three values and not assumed",
+                abs(conv.order - 2.02) < 0.02,
+                f"order {conv.order:.4f}, error ratio "
+                f"{(sequence[1] - sequence[0]) / (sequence[2] - sequence[1]):.4f}",
+            )
+        )
+        rel = abs(conv.extrapolated / closed_radial - 1.0)
+        results.append(
+            _expect(
+                f"{solver}: the radial extrapolant is within RADIAL_REL_TOL of p r^2 / (E t)",
+                rel <= chc.RADIAL_REL_TOL,
+                f"{conv.extrapolated:.12e} against {closed_radial:.12e}, rel {rel:.3e} at tol "
+                f"{chc.RADIAL_REL_TOL:.1e}",
+            )
+        )
+        axial = chc.richardson(_CURVED_AXIAL_SEQUENCES[solver], order_band=ccmp.CURVED_ORDER_BAND)
+        axial_rel = abs(axial.extrapolated / closed_axial - 1.0)
+        results.append(
+            _expect(
+                f"{solver}: the axial order is 2.00 and its extrapolant is within AXIAL_REL_TOL of "
+                f"-nu p r L / (E t)",
+                abs(axial.order - 2.0) < 0.01 and axial_rel <= chc.AXIAL_REL_TOL,
+                f"order {axial.order:.4f}, {axial.extrapolated:.12e} against {closed_axial:.12e}, "
+                f"rel {axial_rel:.3e}",
+            )
+        )
+        low, high = _CURVED_ORDER_RANGE[solver]
+        results.append(
+            _expect(
+                f"{solver}: all 23 significant components converge inside CURVED_ORDER_BAND",
+                ccmp.CURVED_ORDER_BAND[0] <= low and high <= ccmp.CURVED_ORDER_BAND[1],
+                f"{low:.4f} .. {high:.4f} in {ccmp.CURVED_ORDER_BAND}",
+            )
+        )
+        spread = _CURVED_HOOP_SPREAD[solver]
+        results.append(
+            _expect(
+                f"{solver}: the hoop spread shrinks with the grid, and the finest and the "
+                f"extrapolant are inside HOOP_REL_TOL",
+                spread[0] > spread[1] > spread[2] and spread[2] <= chc.HOOP_REL_TOL and spread[3] <= chc.HOOP_REL_TOL,
+                f"{[f'{v:.3e}' for v in spread[:3]]} then extrapolant {spread[3]:.3e} at tol "
+                f"{chc.HOOP_REL_TOL:.1e}",
+            )
+        )
+        worst = max(
+            abs(_CURVED_REACTIONS[solver][axis] + v) / max(abs(x) for x in cvm.expected_load_total())
+            for axis, v in enumerate(cvm.expected_load_total())
+        )
+        results.append(
+            _expect(
+                f"{solver}: the finest grid's reaction total is (-p r L, -p r L, 0) within " f"REACTION_REL_TOL",
+                worst <= chc.REACTION_REL_TOL,
+                f"{tuple(round(v, 4) for v in _CURVED_REACTIONS[solver])}, worst {worst:.3e} at tol "
+                f"{chc.REACTION_REL_TOL:.1e}",
+            )
+        )
+
+    results.append(
+        _expect(
+            "Sestra answers SYMMETRICALLY -- its two mirror-image probes carry the same radial "
+            "displacement to the last digit -- and Abaqus does not; that is the S4R asymmetry",
+            _CURVED_SESTRA["T0_MID"][0] == _CURVED_SESTRA["T90_MID"][1]
+            and _CURVED_ABAQUS["T0_MID"][0] != _CURVED_ABAQUS["T90_MID"][1],
+            f"sestra {_CURVED_SESTRA['T0_MID'][0]:.12e} both sides; abaqus "
+            f"{_CURVED_ABAQUS['T0_MID'][0]:.12e} vs {_CURVED_ABAQUS['T90_MID'][1]:.12e}, rel "
+            f"{abs(_CURVED_ABAQUS['T90_MID'][1] / _CURVED_ABAQUS['T0_MID'][0] - 1.0):.3e}",
+        )
+    )
+    results.append(
+        _expect(
+            "the two extrapolants agree with each other on the headline radial quantity to 8.8e-05",
+            abs(extrapolants["abaqus"] / extrapolants["sestra"] - 1.0) < 1.0e-04,
+            f"rel {abs(extrapolants['abaqus'] / extrapolants['sestra'] - 1.0):.4e}",
+        )
+    )
+    results.append(
+        _expect(
+            "CURVED_REL_TOL is at least twice the measured worst extrapolated component",
+            ccmp.CURVED_REL_TOL >= 2.0 * _CURVED_CROSS_SOLVER["extrapolated"],
+            f"{ccmp.CURVED_REL_TOL:.1e} against a measured {_CURVED_CROSS_SOLVER['extrapolated']:.4e}",
+        )
+    )
+    results.append(
+        _expect(
+            "the extrapolated and single-grid residuals are the same size -- the extrapolation does "
+            "NOT tighten the cross-solver number here, which is this case's finding",
+            0.5 < _CURVED_CROSS_SOLVER["extrapolated"] / _CURVED_CROSS_SOLVER["finest"] < 2.0,
+            f"extrapolated {_CURVED_CROSS_SOLVER['extrapolated']:.4e}, finest " f"{_CURVED_CROSS_SOLVER['finest']:.4e}",
+        )
+    )
+    results.append(
+        _expect(
+            "and the COARSEST grid pair would FAIL CURVED_REL_TOL -- so the tolerance is not one a "
+            "coarse mesh would pass",
+            _CURVED_CROSS_SOLVER["coarsest"] > ccmp.CURVED_REL_TOL,
+            f"coarsest {_CURVED_CROSS_SOLVER['coarsest']:.4e} against tol {ccmp.CURVED_REL_TOL:.1e}",
+        )
+    )
+    # And the comparator itself, on the two measured extrapolated tables.
+    sestra = _curved_table("sestra", _CURVED_SESTRA)
+    abaqus = _curved_table("abaqus", _CURVED_ABAQUS)
+    report = cmp_mod.compare(sestra, abaqus, rel_tol=ccmp.CURVED_REL_TOL)
+    results.append(
+        _expect(
+            "the two measured extrapolated tables agree at CURVED_REL_TOL, all 72 components",
+            report.ok and len(report.diffs) == 6 * len(cvm.PROBE_POINTS),
+            f"{len(report.diffs)} components, {len(report.failures)} failed, worst "
+            f"{report.worst.probe}.{report.worst.component} rel {report.worst.rel_diff:.4e}",
+        )
+    )
+    results.append(
+        _expect(
+            "the worst component is T90_Q.u3, the probe the S4R asymmetry hits hardest",
+            f"{report.worst.probe}.{report.worst.component}" == "T90_Q.u3",
+            f"{report.worst.probe}.{report.worst.component}",
+        )
+    )
+    # The extrapolation machinery on a real sequence, end to end.
+    for solver in ("abaqus", "sestra"):
+        sequence = _curved_sequence(solver)
+        table = ccmp.extrapolate(sequence)
+        measured = ccmp.radial_displacement(table, cvm.RADIAL_PROBE)
+        results.append(
+            _expect(
+                f"{solver}: extrapolate() over the three reconstructed solves reproduces the radial " f"extrapolant",
+                abs(measured / extrapolants[solver] - 1.0) < 1e-09,
+                f"{measured:.12e} against {extrapolants[solver]:.12e}",
+            )
+        )
+        report = ccmp.convergence_report(sequence)
+        results.append(
+            _expect(
+                f"{solver}: convergence_report names the grids by count and prints the order range",
+                report.counts == cvm.MESH_COUNTS and report.radial is not None and report.axial is not None,
+                f"counts {report.counts}, order range {tuple(round(v, 4) for v in report.order_range)}",
+            )
+        )
+    return results
+
+
+def _emitted_curved_script(count: int = 8) -> str:
+    """The CAE script the **writer** produces for the panel, plus the appended driver, as text.
+
+    No licence and no Abaqus: the supports, the regions, the step, the pressure and the driver's
+    own constants are all written at plan time, so the text is checkable here. It is emitted
+    rather than reconstructed because it *is* the deck -- asserting against anything this package
+    built itself would be asserting against a second opinion about the supports.
+    """
+    from . import curved_abaqus_runner as car
+    from . import curved_model as cvm
+
+    assembly = cvm.build_panel(count, route="abaqus")
+    with tempfile.TemporaryDirectory() as tmp:
+        script = pathlib.Path(tmp) / f"{car.SCRIPT_STEM}.py"
+        assembly.to_abaqus_cae_script(
+            script,
+            mesh_size=cvm.PANEL_ARC / count,
+            shell_element_type=car.DEFAULT_SHELL_ELEMENT,
+            job_name=car.JOB_NAME,
+            # The runner's own flag, not a literal: this helper has to emit the deck the production
+            # path emits, or the checks below are about a script nobody runs.
+            submit=car.WRITER_SUBMITS,
+        )
+        return script.read_text(encoding="utf-8") + car.driver_source(count)
+
+
+def check_curved_boundary_semantics() -> list[bool]:
+    """ "Symmetry on two straight generators, free arcs, one axial reference" must mean one thing.
+
+    Both decks are generated from :data:`curved_model.EDGE_SUPPORTS` by a *writer*: ``write_bcs``
+    turns the three ``Bc`` records into ``BNBCD`` FIX codes and the CAE writer into three
+    ``DisplacementBC`` on assembly ``Set``s -- two of geometry **edges** and one of a **vertex**.
+    That split is the whole reason the case was designed with straight generators and a corner
+    reference, so it is asserted off the writer's own emitted calls.
+
+    The expected ``DisplacementBC`` lines are asserted **literally** rather than rebuilt from
+    ``EDGE_SUPPORTS``. Rebuilding them would make this check move with the very data it is
+    checking: found by mutation on the plate case, dropping a dof from a symmetry entry was caught
+    by nothing at all.
+
+    The negative half matters as much as the positive. On the ``theta = 0`` generator ``ur_y`` is
+    **UNSET** -- the rotation about the hoop tangent, which is the one a symmetry plane leaves free
+    -- and on the ``theta = 90`` generator ``ur_x`` is. Fixing either would make the generator a
+    clamp rather than a symmetry plane. And ``AXIAL_REF`` fixes ``u3`` and **nothing else**: it
+    exists to remove one rigid-body mode, and every other dof it touched would be a restraint the
+    closed form does not have.
+    """
+    print("\ncurved boundary-condition semantics (both decks must mean one thing):")
+    from ada.cadit.cae.analysis import BC_KEYWORDS
+
+    from . import curved_abaqus_runner as car
+    from . import curved_model as cvm
+
+    results = []
+    results.append(
+        _expect(
+            "BC_KEYWORDS is adapy's own dof 1..6 order, which the writer renders each Bc's dofs through",
+            tuple(BC_KEYWORDS) == ("u1", "u2", "u3", "ur1", "ur2", "ur3"),
+            f"{tuple(BC_KEYWORDS)}",
+        )
+    )
+    text = _emitted_curved_script()
+    expected = {
+        "AXIAL_REF": "u1=UNSET, u2=UNSET, u3=0.0, ur1=UNSET, ur2=UNSET, ur3=UNSET",
+        "SYM_T0": "u1=UNSET, u2=0.0, u3=UNSET, ur1=0.0, ur2=UNSET, ur3=0.0",
+        "SYM_T90": "u1=0.0, u2=UNSET, u3=UNSET, ur1=UNSET, ur2=0.0, ur3=0.0",
+    }
+    for name, keywords in sorted(expected.items()):
+        line = (
+            f"    model.DisplacementBC(name={name!r}, createStepName='Initial',\n"
+            f"                         region=assembly.sets[{name!r}], {keywords})"
+        )
+        results.append(
+            _expect(
+                f"the writer emits {name} as exactly '{keywords}'",
+                line in text,
+                "found" if line in text else f"MISSING: {line}",
+            )
+        )
+    results.append(
+        _expect(
+            "the three supports named in the model are the three the writer emits, and no more",
+            text.count("model.DisplacementBC(") == len(cvm.EDGE_SUPPORTS) == 3,
+            f"{text.count('model.DisplacementBC(')} DisplacementBC calls for {len(cvm.EDGE_SUPPORTS)} records",
+        )
+    )
+    # The regions: TWO whole straight generator edges and ONE vertex. A curved boundary edge
+    # cannot be a region at all -- a bounding box round a 90-degree arc contains the whole panel --
+    # which is why the supported edges are the generators and the arcs are free.
+    edge_regions = {
+        match.group("name"): (int(match.group("edges")), float(match.group("length")))
+        for match in _EDGE_REGION_CALL.finditer(text)
+    }
+    results.append(
+        _expect(
+            "both symmetry supports are edge regions of exactly one edge, pi m long -- the whole " "generator",
+            edge_regions == {"SYM_T0": (1, cvm.PANEL_LENGTH), "SYM_T90": (1, cvm.PANEL_LENGTH)},
+            f"{edge_regions}",
+        )
+    )
+    vertex_calls = [line.strip() for line in text.splitlines() if line.startswith("    _analysis_region(assembly,")]
+    results.append(
+        _expect(
+            "the axial reference is a VERTEX region at the corner (r, 0, 0), and it is the only one",
+            len(vertex_calls) == 1 and "'AXIAL_REF'" in vertex_calls[0] and "((2.0, 0.0, 0.0),)" in vertex_calls[0],
+            f"{vertex_calls}",
+        )
+    )
+    # ...and what the runner refuses a run for must be the same three kinds the writer emitted. The
+    # two have to agree or read_checks would reject a correct build, or accept a wrong one.
+    emitted_kinds = {name: "edge" for name in edge_regions}
+    emitted_kinds.update({"AXIAL_REF": "vertex"})
+    results.append(
+        _expect(
+            "the kinds the runner insists on are exactly the kinds the writer emitted: two edges " "and one vertex",
+            dict(car.EXPECTED_REGION_KINDS) == emitted_kinds,
+            f"runner {dict(car.EXPECTED_REGION_KINDS)} against emitted {emitted_kinds}",
+        )
+    )
+    # The calls, not the helper definitions the writer emits alongside them: every region call
+    # sits indented inside build(), and the writer emits all three helpers whether or not it uses
+    # them -- a check that matched the def would pass on any script at all.
+    face_calls = text.count("\n    _analysis_face_region(assembly,")
+    edge_calls = text.count("\n    _analysis_edge_region(assembly,")
+    results.append(
+        _expect(
+            "no support is a FACE region -- a face region would hold every node of the panel -- and "
+            "exactly two are edges",
+            face_calls == 0 and edge_calls == 2,
+            f"{edge_calls} edge region call(s), {face_calls} face, {len(vertex_calls)} vertex",
+        )
+    )
+    # The load. side1Faces and a NEGATIVE magnitude: the face's normal is outward radial, and
+    # Abaqus takes a positive magnitude as acting into side1, which would be external pressure.
+    results.append(
+        _expect(
+            "the pressure is emitted with the model's own NEGATIVE magnitude, over a side1Faces "
+            "Surface -- which is what makes an internal pressure expand the shell",
+            f"magnitude={cvm.SIGNED_PRESSURE_MAGNITUDE}" in text
+            and cvm.SIGNED_PRESSURE_MAGNITUDE < 0.0
+            and "side1Faces=faces" in text,
+            f"magnitude={cvm.SIGNED_PRESSURE_MAGNITUDE}, one Pressure call: " f"{text.count('model.Pressure(') == 1}",
+        )
+    )
+    results.append(
+        _expect(
+            "the writer is asked NOT to submit, and the appended driver carries the job and the "
+            "sidecar instead -- because the writer's own equilibrium guard cannot check a pressure "
+            "on a curved face",
+            car.WRITER_SUBMITS is False
+            and "def solve(" not in text
+            and f"CURVED_JOB = {car.JOB_NAME!r}" in text
+            and f"CURVED_DISPLACEMENTS = {car.DISPLACEMENTS_NAME!r}" in text
+            and "def _curved_solve():" in text,
+            f"WRITER_SUBMITS={car.WRITER_SUBMITS}, {car.JOB_NAME} -> {car.DISPLACEMENTS_NAME}",
+        )
+    )
+    results.append(
+        _expect(
+            "the driver carries BOTH pressure resultants -- the exact one it checks against and the "
+            "writer's flat-plate one -- so the defect is measured on every run",
+            f"CURVED_APPLIED_PRESSURE = {car.exact_pressure_resultant()!r}" in text
+            and "CURVED_WRITER_PRESSURE = " in text
+            and "residual_with_writer_formula" in text,
+            f"exact {car.exact_pressure_resultant()}",
+        )
+    )
+    # The defect itself, reproduced through the writer's own planner rather than by reimplementing
+    # its formula -- so this check stops passing the day the writer is fixed.
+    error = car.writer_pressure_error()
+    results.append(
+        _expect(
+            "AnalysisPlan.applied_pressure is over 15% wrong on this face and 7.6% asymmetric, "
+            "against a guard tolerance of 1e-04",
+            error["relative"] > 0.15 and error["skew"] > 0.07,
+            f"worst component off by {error['worst_component_error']:.6g} N ({error['relative']:.3e}), "
+            f"skew {error['skew']:.3e}",
+        )
+    )
+    results.append(
+        _expect(
+            "the route decides the load form and nothing else -- the supports are the same records " "on both",
+            cvm.LOAD_STYLES == {"sestra": "nodal", "abaqus": "pressure"} and cvm.ROUTES == ("sestra", "abaqus"),
+            f"{cvm.LOAD_STYLES}",
+        )
+    )
+    results.append(
+        _expect_raise(
+            "an unknown route is refused rather than defaulted",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.build_panel(8, route="ansys"),
+        )
+    )
+    return results
+
+
+def check_curved_loud_failures() -> list[bool]:
+    """Every curved guard, run against the input it exists for. Each must raise."""
+    print("\ncurved loud-failure guards (each must raise):")
+    from . import compare as cmp_mod
+    from . import curved_compare as ccmp
+    from . import curved_hand_check as chc
+    from . import curved_model as cvm
+
+    results = []
+    sestra = _curved_table("sestra", _CURVED_SESTRA)
+
+    # 1. THE curved-case failure: an internal pressure that contracts the shell. A flipped face
+    # normal, a positive *Dsload magnitude or a facet whose node ordering reversed all produce a
+    # perfectly converged, perfectly equilibrated answer of the wrong sign.
+    inward = _curved_table("sestra", {name: (-a, -b, c) for name, (a, b, c) in _CURVED_SESTRA.items()})
+    results.append(
+        _expect_raise(
+            "a pressure with the wrong sign -- the panel contracts under an internal pressure",
+            ccmp.ContractsUnderInternalPressure,
+            lambda: ccmp.assert_pressure_expands(inward),
+        )
+    )
+    results.append(
+        _expect(
+            "...and the correct table passes it, returning the smallest radial displacement",
+            abs(ccmp.assert_pressure_expands(sestra) / chc.radial_displacement() - 1.0) < 1.0e-03,
+            f"smallest radial {ccmp.assert_pressure_expands(sestra):.9e}",
+        )
+    )
+    results.append(
+        _expect_raise(
+            "an unloaded panel, which neither expands nor contracts -- not the same as a pressure " "that arrived",
+            ccmp.ContractsUnderInternalPressure,
+            lambda: ccmp.assert_pressure_expands(_curved_table("sestra", {k: (0.0, 0.0, 0.0) for k in _CURVED_SESTRA})),
+        )
+    )
+
+    # 2. A symmetry dof dropped. These three records are the only route by which either solver
+    # hears about the supports, so a record lost on the way in is a support lost from both decks.
+    supported = _curved_fem_stub()
+    supported.bcs = [_FakeBc(name, list(dofs)) for name, dofs, _why in cvm.EDGE_SUPPORTS]
+    results.append(
+        _expect(
+            "the three EDGE_SUPPORTS records pass the guard that says they are all there",
+            cvm.assert_supports_declared(supported) is None,
+            f"{[bc.name for bc in supported.bcs]}",
+        )
+    )
+    dropped = _curved_fem_stub()
+    dropped.bcs = [_FakeBc(name, list(dofs)) for name, dofs, _why in cvm.EDGE_SUPPORTS[:-1]]
+    results.append(
+        _expect_raise(
+            "the axial reference never added as a Bc -- which leaves the one singular direction",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_supports_declared(dropped),
+        )
+    )
+    loosened = _curved_fem_stub()
+    loosened.bcs = [_FakeBc(name, [d for d in dofs if d != 6]) for name, dofs, _why in cvm.EDGE_SUPPORTS]
+    results.append(
+        _expect_raise(
+            "ur_z dropped from both symmetry records -- the panel is then not a quarter of a cylinder",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_supports_declared(loosened),
+        )
+    )
+
+    # 3. A curved plate that meshed to fewer shells than expected. Its chord error is then not the
+    # one its place in the refinement sequence assumes, so the extrapolation is of the wrong thing.
+    assembly = cvm.build_panel(8, route="sestra")
+    fem = _curved_part(assembly).fem
+    results.append(
+        _expect(
+            "the 8 x 8 grid passes assert_shell_grid at count=8",
+            cvm.assert_shell_grid(fem, count=8) is None,
+            f"{len(cvm.shell_elements(fem))} shell(s)",
+        )
+    )
+    results.append(
+        _expect_raise(
+            "a panel that meshed to fewer shells than the model asked for",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_shell_grid(fem, count=16),
+        )
+    )
+    beams_only = _unit_grid(2, 2, kind="LineShapes.LINE")
+    results.append(
+        _expect_raise(
+            "a FEM with no shell elements at all -- every number here comes from a membrane state",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_shell_grid(beams_only, count=2),
+        )
+    )
+    # ...and the three geometric clauses, each on a grid broken in exactly one way.
+    off_radius = cvm.build_panel(8, route="sestra")
+    off_fem = _curved_part(off_radius).fem
+    for node in off_fem.nodes:
+        if abs(node.z - cvm.PANEL_LENGTH / 2.0) < 1e-12:
+            node.p = (node.p[0] * 1.001, node.p[1] * 1.001, node.p[2])
+    results.append(
+        _expect_raise(
+            "a grid whose nodes are off radius r -- w goes as r^2, so 1% of radius is 2% of answer",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_shell_grid(off_fem, count=8),
+        )
+    )
+    # One corner slid ALONG the cylinder to a slightly different theta, keeping its radius and its
+    # z. That is the only way to warp a facet of this grid without also moving a node off radius r,
+    # and it matters: lifting the corner along the facet normal warps it too, but it is then the
+    # on-the-cylinder clause that raises and the planarity clause is never reached -- found by
+    # mutation, which is exactly what deleting the planarity clause failed to be caught by.
+    warped = cvm.build_panel(8, route="sestra")
+    warped_fem = _curved_part(warped).fem
+    element = cvm.shell_elements(warped_fem)[0]
+    node = element.nodes[2]
+    angle = math.atan2(node.p[1], node.p[0]) + 1.0e-04
+    node.p = (cvm.PANEL_RADIUS * math.cos(angle), cvm.PANEL_RADIUS * math.sin(angle), node.p[2])
+    results.append(
+        _expect_raise(
+            "a WARPED facet -- integral(N_i) dA = A / 4 holds only on a rectangle, so the "
+            "consistent nodal load would stop being the pressure's own vector",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_shell_grid(warped_fem, count=8),
+        )
+    )
+    flipped = cvm.build_panel(8, route="sestra")
+    flipped_fem = _curved_part(flipped).fem
+    element = cvm.shell_elements(flipped_fem)[0]
+    element._nodes = list(reversed(element.nodes))
+    results.append(
+        _expect_raise(
+            "a facet whose normal points at the cylinder axis -- it would carry the internal "
+            "pressure inwards while the rest expands",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_shell_grid(flipped_fem, count=8),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "a grid count that is not a multiple of four, so z = L/4 is not a node",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.shell_grid(6),
+        )
+    )
+    unseeded = _curved_fem_stub()
+    results.append(
+        _expect_raise(
+            "a mesh with no node at a probe point, which would sample the wrong place",
+            cvm.CurvedModelInvalid,
+            lambda: cvm.assert_probes_are_seeded(unseeded, count=8),
+        )
+    )
+
+    # 4. The hoop state, the axial contraction, and the reaction -- the three physical guards.
+    fanned = dict(_CURVED_SESTRA)
+    fanned["ARC0_MID"] = tuple(v * 0.99 for v in _CURVED_SESTRA["ARC0_MID"])
+    results.append(
+        _expect_raise(
+            "a panel whose radial expansion is not uniform round its hoop -- so p r^2 / (E t) with "
+            "no nu in it is the wrong closed form",
+            ccmp.NotUniform,
+            lambda: ccmp.assert_hoop_uniform(_curved_table("sestra", fanned)),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "an unloaded panel, which is uniform round its hoop too",
+            ccmp.NotUniform,
+            lambda: ccmp.assert_hoop_uniform(_curved_table("sestra", {k: (0.0, 0.0, 0.0) for k in _CURVED_SESTRA})),
+        )
+    )
+    held = {name: (a, b, 0.0) for name, (a, b, _c) in _CURVED_SESTRA.items()}
+    results.append(
+        _expect_raise(
+            "u_z held everywhere -- the axial Poisson contraction is restrained and the second "
+            "closed form is the wrong one",
+            ccmp.AxialRestraintPresent,
+            lambda: ccmp.assert_axial_contraction(_curved_table("sestra", held)),
+        )
+    )
+    shifted = {name: (a, b, c - 1.0e-06) for name, (a, b, c) in _CURVED_SESTRA.items()}
+    results.append(
+        _expect_raise(
+            "u_z non-zero at z = 0 -- something other than the one reference node is restraining "
+            "the axial direction",
+            ccmp.AxialRestraintPresent,
+            lambda: ccmp.assert_axial_contraction(_curved_table("sestra", shifted)),
+        )
+    )
+    # The slope clause alone: every u3 5% too small, so the field is still perfectly LINEAR and
+    # only its gradient is wrong. That is an axial restraint somewhere, and nothing else in this
+    # module would notice it.
+    slack = {name: (a, b, 0.95 * c) for name, (a, b, c) in _CURVED_SESTRA.items()}
+    results.append(
+        _expect_raise(
+            "u_z linear but 5% short -- the axial contraction is being partly held",
+            ccmp.AxialRestraintPresent,
+            lambda: ccmp.assert_axial_contraction(_curved_table("sestra", slack)),
+        )
+    )
+    # The linearity clause alone: ONE probe's u3 1% out. Over ten probes that moves the mean slope
+    # by 0.1%, which is inside AXIAL_REL_TOL, while the nonlinearity at that probe is the full 1%
+    # and is not -- so this input isolates the second clause from the first. The two mutations that
+    # delete them are each caught by exactly one of these two checks.
+    bent = dict(_CURVED_SESTRA)
+    bent["T0_MID"] = (
+        _CURVED_SESTRA["T0_MID"][0],
+        0.0,
+        _CURVED_SESTRA["T0_MID"][2] * 1.01,
+    )
+    results.append(
+        _expect_raise(
+            "u_z not linear in z -- one probe out by 1%, which leaves the mean slope inside its own "
+            "tolerance and the linearity outside",
+            ccmp.AxialRestraintPresent,
+            lambda: ccmp.assert_axial_contraction(_curved_table("sestra", bent)),
+        )
+    )
+    results.append(
+        _expect(
+            "...and the measured Sestra extrapolant passes all three axial clauses",
+            ccmp.assert_axial_contraction(sestra)["relative"] <= chc.AXIAL_REL_TOL,
+            f"{ {k: f'{v:.3e}' for k, v in ccmp.assert_axial_contraction(sestra).items()} }",
+        )
+    )
+    results.append(
+        _expect_raise(
+            "a solve that reacted half the pressure",
+            ccmp.ReactionMismatch,
+            lambda: ccmp.assert_reaction_total(
+                _curved_solve(sestra, count=8, reaction=tuple(-0.5 * v for v in cvm.expected_load_total()))
+            ),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "a solve whose reaction has the SAME sign as the load -- the supports pushing the panel " "outwards",
+            ccmp.ReactionMismatch,
+            lambda: ccmp.assert_reaction_total(_curved_solve(sestra, count=8, reaction=cvm.expected_load_total())),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "a non-zero axial reaction -- an open-ended cylinder reacts nothing in z, so the arc " "ends are not free",
+            ccmp.ReactionMismatch,
+            lambda: ccmp.assert_reaction_total(
+                _curved_solve(
+                    sestra,
+                    count=8,
+                    reaction=(-cvm.expected_load_total()[0], -cvm.expected_load_total()[1], 1.0e3),
+                )
+            ),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "the axial reference node carrying real load, which is the same defect from the " "reaction side",
+            ccmp.AxialRestraintPresent,
+            lambda: ccmp.assert_reference_node_carries_nothing((0.0, 0.0, 1.0e3)),
+        )
+    )
+    results.append(
+        _expect(
+            "...and a node that carries nothing passes it",
+            ccmp.assert_reference_node_carries_nothing((0.0, 0.0, 5.3e-09)) < 1.0e-05,
+            "5.3e-09 N in z, which is what Sestra measures there",
+        )
+    )
+
+    # 5. A refinement sequence that is not one, and a component that does not converge.
+    results.append(
+        _expect_raise(
+            "two grids instead of three -- two can only confirm a rate that was assumed",
+            plate_compare_not_a_sequence(),
+            lambda: ccmp.extrapolate(_curved_sequence("sestra")[:2]),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "a sequence out of order, fine to coarse -- it extrapolates away from the limit",
+            plate_compare_not_a_sequence(),
+            lambda: ccmp.extrapolate(list(reversed(_curved_sequence("sestra")))),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "two solvers mixed into one sequence",
+            plate_compare_not_a_sequence(),
+            lambda: ccmp.extrapolate(_curved_sequence("sestra")[:2] + _curved_sequence("abaqus")[2:]),
+        )
+    )
+    turning = _curved_sequence("sestra")
+    middle = dict(_CURVED_SESTRA)
+    middle["T0_MID"] = (_CURVED_SESTRA["T0_MID"][0] * 1.5, 0.0, _CURVED_SESTRA["T0_MID"][2])
+    turning[1] = _curved_solve(_curved_table("sestra", middle), count=cvm.MESH_COUNTS[1])
+    results.append(
+        _expect_raise(
+            "a component whose sequence turns around instead of approaching a limit",
+            chc.NotConverging,
+            lambda: ccmp.extrapolate(turning),
+        )
+    )
+    # A genuine FIRST-order sequence: the error halves rather than quartering when the grid
+    # doubles. That is what a locking element, or a "refinement" that did not change the mesh,
+    # actually looks like -- and CURVED_ORDER_BAND excludes it even at its width.
+    first_order = []
+    for index, factor in enumerate((1.0, 0.5, 0.25)):
+        values = {name: tuple(v * (1.0 - 0.01 * factor) for v in row) for name, row in _CURVED_SESTRA.items()}
+        first_order.append(_curved_solve(_curved_table("sestra", values), count=cvm.MESH_COUNTS[index]))
+    results.append(
+        _expect_raise(
+            "a FIRST-order sequence, which is what a locking element or a mesh that was not "
+            "actually refined gives -- outside CURVED_ORDER_BAND even at its width",
+            chc.NotConverging,
+            lambda: ccmp.extrapolate(first_order),
+        )
+    )
+    odd_seed = dataclasses.replace(_curved_solve(sestra, count=8), mesh_size=0.3)
+    results.append(
+        _expect_raise(
+            "a seed that is not PANEL_ARC / n for any whole n -- a solve from a different study",
+            plate_compare_not_a_sequence(),
+            lambda: ccmp.grid_count(odd_seed),
+        )
+    )
+
+    # 6. The two cases must never be cross-compared: their probe sets are different structures.
+    results.append(
+        _expect_raise(
+            "the curved probe set compared against the portal frame's",
+            cmp_mod.ProbeSetMismatch,
+            lambda: cmp_mod.compare(sestra, _table("abaqus", _REFERENCE)),
+        )
+    )
+
+    # 7. The premise the analytic grid rests on. A workaround whose reason has quietly become false
+    # is worse than no workaround, so the three refusals are reproduced on every run.
+    findings = cvm.reproduce_meshing_refusals()
+    results.append(
+        _expect(
+            "adapy still refuses to mesh a PlateCurved at all three points, so the analytic grid is "
+            "still the nearest expressible equivalent",
+            ccmp.assert_meshing_gap_is_still_open(findings) == findings,
+            "; ".join(f"{k}: {findings[k]}" for k in sorted(findings)),
+        )
+    )
+    results.append(
+        _expect_raise(
+            "and the day one of them starts working, this package is told to delete its grid",
+            ccmp.MeshingGapClosed,
+            lambda: ccmp.assert_meshing_gap_is_still_open({**findings, "PlateCurved.shell_occ": "returned a shape"}),
+        )
+    )
+    return results
+
+
+def plate_compare_not_a_sequence():
+    from . import plate_compare
+
+    return plate_compare.NotASequence
+
+
+def _curved_fem_stub():
+    """A ``_FakeFem`` with nodes nowhere near the panel -- for the guards that only read nodes."""
+    return _unit_grid(4, 4, dx=0.1, dy=0.1)
+
+
 def main() -> int:
     results = (
         check_loud_failures()
@@ -1557,6 +2723,10 @@ def main() -> int:
         + check_plate_agreement()
         + check_plate_boundary_semantics()
         + check_plate_loud_failures()
+        + check_curved_closed_forms()
+        + check_curved_convergence()
+        + check_curved_boundary_semantics()
+        + check_curved_loud_failures()
     )
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} checks passed")

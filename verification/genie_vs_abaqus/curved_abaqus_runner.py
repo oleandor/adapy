@@ -133,6 +133,16 @@ BUILD_RESULT_NAME = "{0}.cae_build_result.json".format(SCRIPT_STEM)
 #: told apart from one whose driver simply did not run.
 DRIVER_MARKER = "ADAPY-CAE CURVED SOLVE OK"
 
+#: Whether ``to_abaqus_cae_script`` is asked to submit the job. **False**, and it is a named
+#: constant rather than a literal at the one call site for a reason: it is the whole of what this
+#: case does differently from the plate case's, and it is what the licence-free selftest emits
+#: with, so a change to it is caught there rather than only on a run that spends a CAE token. With
+#: it True the writer's own ``solve()`` runs its ``_guard_equilibrium``, which computes a curved
+#: face's pressure resultant with the flat-plate formula, fails by about 1000x its tolerance and
+#: leaves no displacement sidecar -- and the appended driver would then be a second solve of a
+#: model that had already failed.
+WRITER_SUBMITS = False
+
 #: Relative tolerance the driver's own equilibrium check uses, against the larger of the exact
 #: pressure resultant and the largest single nodal reaction. 1e-04, the same figure
 #: ``ada.cadit.cae.writer.EQUILIBRIUM_REL_TOL`` uses -- the check is the writer's, only its
@@ -546,7 +556,7 @@ def emit_and_run(
         mesh_size=curved_model.PANEL_ARC / count,
         shell_element_type=shell_element_type,
         job_name=JOB_NAME,
-        submit=False,
+        submit=WRITER_SUBMITS,
     )
     with script.open("a", encoding="utf-8") as handle:
         handle.write(driver_source(count))
@@ -756,20 +766,64 @@ def read_sequence(
 def measure_pressure_sign(
     work_dir: str | pathlib.Path, *, count: int = curved_model.MESH_COUNTS[0]
 ) -> dict[str, float]:
-    """Solve the panel with the pressure magnitude **reversed**, and report what it did.
+    """Solve the panel with the pressure magnitude **reversed**, and report which way it pushed.
 
-    One extra CAE solve, on the coarsest grid, for the one question a curved face asks that a
-    flat plate does not: which way does ``side1Faces`` point once the face's normal turns
-    through 90 degrees. Reported rather than asserted in the production sequence, because the
-    answer is a property of Abaqus and this writer and not of the model.
+    One extra CAE solve, on the coarsest grid, for the one question a curved face asks that a flat
+    plate does not: which way does ``side1Faces`` point once the face's own normal turns through
+    90 degrees. Reported rather than asserted in the production sequence, because the answer is a
+    property of Abaqus and of this writer and not of the model.
+
+    The **reaction total's sign** is the measurement, and it is read out of the build-result
+    sidecar rather than out of a displacement table -- for a reason worth stating, because it is
+    what makes this function work at all. The appended driver checks equilibrium against the
+    *model's own* (outward) pressure resultant, so a run with the magnitude reversed is **meant**
+    to fail that check: it comes back with a residual of ``2 p r L`` -- the whole load twice over --
+    and writes no displacement sidecar. That failure is the answer rather than an obstacle, so this
+    reads the reaction the driver recorded on its way down. Measured on this panel at ``n = 8``:
+
+        magnitude -1e5 (the model's)  reaction total  (-628318.555, -628318.559, -0.005)
+        magnitude +1e5 (reversed)     reaction total  (+628318.555, +628318.559, +0.005)
+                                      residual against the outward resultant 1256637.089 = 2 p r L
+
+    -- the reactions flip with the magnitude, so a **positive** ``Pressure`` magnitude on this face
+    pulls the panel inwards, and an internal pressure needs the negative one
+    (:data:`curved_model.SIGNED_PRESSURE_MAGNITUDE`).
     """
-    run_dir = emit_and_run(work_dir, count=count, pressure_magnitude=-curved_model.SIGNED_PRESSURE_MAGNITUDE)
-    solve = abaqus_displacements(run_dir, count=count)
-    radial = radial_displacement(solve.table, curved_model.RADIAL_PROBE)
+    reversed_magnitude = -curved_model.SIGNED_PRESSURE_MAGNITUDE
+    try:
+        emit_and_run(work_dir, count=count, pressure_magnitude=reversed_magnitude)
+    except AbaqusFailed:
+        # Expected: the driver's equilibrium term is the model's own outward resultant, so a
+        # reversed pressure is out of balance by 2 p r L. The reaction it recorded is the answer.
+        pass
+    run_dir = pathlib.Path(work_dir) / run_dir_name(count, pressure_magnitude=reversed_magnitude)
+    path = run_dir / BUILD_RESULT_NAME
+    if not path.is_file():
+        raise AbaqusFailed(
+            "no {0} in {1}, so the reversed-pressure run left nothing to read the sign off. The "
+            "measurement is the reaction total's sign, which the appended driver records before it "
+            "fails the equilibrium check.".format(BUILD_RESULT_NAME, run_dir)
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    equilibrium = payload.get("curved_equilibrium") or {}
+    if "reaction_force_sum" not in equilibrium:
+        raise AbaqusFailed(
+            "{0} carries no reaction total (it holds {1}), which means the solve never got far "
+            "enough to report one -- so whether the pressure pushed in or out is unanswered.".format(
+                path, sorted(equilibrium) or "nothing"
+            )
+        )
+    reaction = [float(v) for v in equilibrium["reaction_force_sum"]]
+    outward = curved_model.expected_load_total()
     return {
-        "magnitude": -curved_model.SIGNED_PRESSURE_MAGNITUDE,
-        "radial_at_probe": radial,
-        "reaction_x": solve.reaction_total[0],
+        "magnitude": reversed_magnitude,
+        "reaction_x": reaction[0],
+        "reaction_y": reaction[1],
+        "reaction_z": reaction[2],
+        # +1 when the reaction opposes an outward load (an internal pressure), -1 when it opposes
+        # an inward one. The sign as one number, so a report cannot misread three.
+        "load_direction": -1.0 if reaction[0] * outward[0] > 0.0 else 1.0,
+        "residual_against_outward": float(equilibrium.get("residual", 0.0)),
     }
 
 

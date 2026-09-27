@@ -589,11 +589,15 @@ def curved_main(args) -> int:
         except (abaqus_runner.AbaqusNotInstalled, abaqus_runner.AbaqusFailed, OSError) as exc:
             print(f"ERROR: the pressure-sign measurement could not be run: {exc}", file=sys.stderr)
             return 2
+        direction = "OUTWARD" if sign["load_direction"] > 0.0 else "INWARD"
         print(
-            f"\npressure sign on the curved face: with magnitude {sign['magnitude']:+.6g} Pa the "
-            f"radial displacement at {curved_model.RADIAL_PROBE} is {sign['radial_at_probe']:+.6e} m "
-            f"and the x reaction {sign['reaction_x']:+.6g} N -- so a POSITIVE Pressure magnitude "
-            f"acts into side1Faces, i.e. against the face's own outward radial normal, and "
+            f"\npressure sign on the curved face: with the magnitude reversed to "
+            f"{sign['magnitude']:+.6g} Pa the reaction total is "
+            f"({sign['reaction_x']:+.4f}, {sign['reaction_y']:+.4f}, {sign['reaction_z']:+.4f}) N "
+            f"against the model's own {tuple(round(-v, 4) for v in curved_model.expected_load_total())}, "
+            f"i.e. the load acted {direction}, and the driver's equilibrium check therefore failed by "
+            f"{sign['residual_against_outward']:.6g} N = 2 p r L. So a POSITIVE Pressure magnitude "
+            f"acts into side1Faces -- against the face's own outward radial normal -- and "
             f"curved_model.SIGNED_PRESSURE_MAGNITUDE is negative for an internal pressure."
         )
         for key in sorted(curved_abaqus_runner.PRESSURE_SIGN_MEASUREMENT):

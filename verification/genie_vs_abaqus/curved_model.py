@@ -764,7 +764,10 @@ def assert_shell_grid(fem, *, count: int | None = None) -> None:
     for element in shells:
         points = np.asarray([node.p for node in element.nodes], dtype=float)
         normal = element_normal(element)
-        worst_warp = max(worst_warp, abs(float(np.dot(points[3] - points[0] + points[1] - points[2], normal))))
+        # The third corner's distance from the plane of the other three, which is what "warped"
+        # means for a quad. Not the sum of the two diagonals' projections: that vanishes for a
+        # corner lifted along z, and z lies in the plane of every facet of a cylinder.
+        worst_warp = max(worst_warp, abs(float(np.dot(points[2] - points[0], normal))))
         centre = points.mean(axis=0)
         if float(np.dot(normal, np.array([centre[0], centre[1], 0.0]))) <= 0.0:
             inward.append(element.id)

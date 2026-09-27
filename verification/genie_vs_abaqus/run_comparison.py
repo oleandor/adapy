@@ -1,11 +1,23 @@
 """CLI for the cross-solver comparisons. Run from the repository root.
 
-Two cases, chosen with ``--case``. They share the exchange format (:mod:`displacements`) and the
+Three cases, chosen with ``--case``. They share the exchange format (:mod:`displacements`) and the
 comparator (:mod:`compare`) and nothing else, because they are asking different questions: the
 portal frame compares two *beam* formulations that have no discretisation error left to speak of,
 at one mesh, node for node; the plate strip compares two *shell* formulations that both converge
-with mesh, at three densities, between their extrapolants. ``--case frame`` is the default and
-everything below it is unchanged.
+with mesh, at three densities, between their extrapolants; and the curved panel asks the same
+question of a **non-planar** plate, where the discretisation is a *faceting* of the geometry
+itself and the closed form is exact. ``--case frame`` is the default and everything below it is
+unchanged.
+
+The curved case, both solvers -- three Sestra solves and three Abaqus ones::
+
+    python -m verification.genie_vs_abaqus.run_comparison --case curved --work-dir D:/temp/curved
+
+and, with one extra CAE solve, the measurement of which way a positive pressure pushes on a
+curved face::
+
+    python -m verification.genie_vs_abaqus.run_comparison --case curved --work-dir D:/temp/curved \
+        --measure-pressure-sign
 
 The plate case, both solvers and both variants -- six Sestra solves and six Abaqus ones::
 
@@ -40,6 +52,7 @@ performed at all (no Sestra, solver error, unreadable table). A failed *check* a
 from __future__ import annotations
 
 import argparse
+import pathlib
 import sys
 
 from . import abaqus_runner, compare, hand_check, model, sestra_runner
@@ -55,10 +68,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--case",
-        choices=("frame", "plate"),
+        choices=("frame", "plate", "curved"),
         default="frame",
         help="which comparison to run (default: frame, the portal frame; see the module docstring "
-        "for why the plate case is a convergence study and the frame is not)",
+        "for why the plate and curved cases are convergence studies and the frame is not)",
+    )
+    parser.add_argument(
+        "--measure-pressure-sign",
+        action="store_true",
+        help="curved case only: spend one extra CAE solve on the coarsest grid with the pressure "
+        "magnitude reversed, and report which way the panel moved. The one question a curved face "
+        "asks that a flat plate does not",
     )
     parser.add_argument(
         "--reuse",
@@ -112,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.case == "plate":
         return plate_main(args)
+    if args.case == "curved":
+        return curved_main(args)
 
     if args.write_abaqus_template:
         path = abaqus_runner.write_template_json(args.write_abaqus_template)
@@ -369,6 +391,221 @@ def plate_main(args) -> int:
 
     if exit_code == 0:
         print(f"\nplate case passed: both variants agree at rel {rel_tol:.1e} after extrapolation.")
+    return exit_code
+
+
+def curved_main(args) -> int:
+    """The curved case: three grids per solver, extrapolated, then compared.
+
+    The order of what follows is the order of the argument it makes, and every step is a check
+    that can fail on its own:
+
+    1. the closed forms, printed from the model's own material and geometry so nothing is retyped,
+       and the three refusals that make this package build its own shell grid
+       (:func:`curved_compare.assert_meshing_gap_is_still_open`) -- because a workaround whose
+       premise has quietly become false is worse than no workaround;
+    2. per solver, the three-grid sequence and its **measured** order, plus the order range over
+       every significant component -- :func:`curved_compare.convergence_report`. A sequence that is
+       not converging raises here rather than being extrapolated;
+    3. each solve's reaction total against ``(-p r L, -p r L, 0)``, both solvers -- where the two
+       different load forms (a ``*Dsload`` on the Abaqus side, the exact consistent nodal vector on
+       the Sestra one) are shown to be the same load, and where a restrained arc end would appear
+       as a non-zero ``fz`` before it appeared anywhere else;
+    4. that every probe moved **outward** -- :func:`curved_compare.assert_pressure_expands`, the
+       check a curved face needs and a flat plate does not;
+    5. the hoop-uniformity spread at every grid, asserted on the finest and on the extrapolant --
+       which is what says the membrane closed form with no ``nu`` in it is the right one;
+    6. the two hand checks, against two exact closed forms: the extrapolated radial expansion
+       against ``p r^2 / (E t)`` at :data:`curved_hand_check.RADIAL_REL_TOL`, and the axial
+       contraction -- slope, zero at ``z = 0``, and linearity in ``z`` -- against
+       ``-nu p r z / (E t)`` at :data:`curved_hand_check.AXIAL_REL_TOL`. These are the tight
+       statements of this case;
+    7. the cross-solver comparison between the **extrapolants** at
+       :data:`curved_compare.CURVED_REL_TOL`, and the same at the finest grid only, printed
+       together because on this case they are the same number and that is itself the finding
+       (step 3 of :mod:`curved_compare`'s docstring);
+    8. the writer defect this case turned up, measured on every run: what
+       ``AnalysisPlan.applied_pressure`` computes for a curved face against
+       ``integral(p n dA)``, and the residual it would have left.
+    """
+    from . import (
+        curved_abaqus_runner,
+        curved_compare,
+        curved_hand_check,
+        curved_model,
+        curved_sestra_runner,
+    )
+
+    rel_tol = curved_compare.CURVED_REL_TOL if args.plate_rel_tol is None else args.plate_rel_tol
+    print(curved_compare.format_closed_forms())
+    print(
+        f"\ngrids {curved_model.MESH_COUNTS} elements a side (seeds {curved_model.MESH_SIZES}), "
+        f"{len(curved_model.PROBE_POINTS)} probes, "
+        f"{'reusing existing artefacts' if args.reuse else 'solving'}"
+    )
+    try:
+        findings = curved_compare.assert_meshing_gap_is_still_open()
+    except curved_compare.MeshingGapClosed as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print("adapy still cannot mesh a PlateCurved, so this package builds the grid itself:")
+    for name in sorted(findings):
+        print(f"  {name:<24} {findings[name]}")
+
+    solves: dict[str, list] = {}
+    try:
+        solves["sestra"] = (
+            curved_sestra_runner.read_sequence(args.work_dir)
+            if args.reuse
+            else curved_sestra_runner.run_sequence(args.work_dir)
+        )
+    except (sestra_runner.SestraNotInstalled, sestra_runner.SestraFailed, OSError) as exc:
+        print(f"ERROR: the Sestra side could not be run: {exc}", file=sys.stderr)
+        return 2
+    try:
+        solves["abaqus"] = (
+            curved_abaqus_runner.read_sequence(args.work_dir)
+            if args.reuse
+            else curved_abaqus_runner.run_sequence(args.work_dir)
+        )
+    except (abaqus_runner.AbaqusNotInstalled, abaqus_runner.AbaqusFailed, OSError) as exc:
+        print(f"ERROR: the Abaqus side could not be run: {exc}", file=sys.stderr)
+        return 2
+
+    exit_code = 0
+    extrapolated: dict[str, DisplacementTable] = {}
+    radial_closed = curved_hand_check.radial_displacement()
+    axial_closed = curved_hand_check.axial_displacement(curved_model.PANEL_LENGTH)
+    for solver in ("sestra", "abaqus"):
+        sequence = solves[solver]
+        print()
+        print(curved_compare.convergence_report(sequence).format_table())
+        for solve in sequence:
+            residual = curved_compare.assert_reaction_total(solve)
+            outward = curved_compare.assert_pressure_expands(solve.table)
+            spread = curved_compare.assert_hoop_uniform(solve.table, rel_tol=1.0)
+            print(
+                f"  n={curved_compare.grid_count(solve):<3} reaction "
+                f"{tuple(round(v, 3) for v in solve.reaction_total)} (worst rel {residual:.2e} of "
+                f"p r L), hoop spread {spread:.3e}, smallest radial {outward:.6e} (outward), "
+                f"elements {solve.element_counts or '(not reported)'}"
+            )
+        # The hoop check bites on the CONVERGED answer: the non-uniformity is discretisation and
+        # the coarsest grid's is the largest, so it is reported above at every grid and asserted
+        # here. See curved_hand_check.HOOP_REL_TOL for the table that sets the number.
+        finest_spread = curved_compare.assert_hoop_uniform(sequence[-1].table)
+        extrapolated[solver] = curved_compare.extrapolate(sequence)
+        extrapolated_spread = curved_compare.assert_hoop_uniform(extrapolated[solver])
+        print(
+            f"  hoop uniformity: finest grid {finest_spread:.3e}, extrapolant "
+            f"{extrapolated_spread:.3e}, at tol {curved_hand_check.HOOP_REL_TOL:.1e}"
+        )
+
+        measured = curved_compare.radial_displacement(extrapolated[solver], curved_model.RADIAL_PROBE)
+        rel = abs(measured / radial_closed - 1.0)
+        tol = curved_hand_check.RADIAL_REL_TOL
+        print(
+            f"  hand check 1 (radial): extrapolant {measured:.12e} against p r^2/(E t) = "
+            f"{radial_closed:.12e} -> rel {rel:.3e} at tol {tol:.1e}  "
+            f"{'PASS' if rel <= tol else 'FAIL'}"
+        )
+        if rel > tol:
+            print(
+                f"HAND CHECK FAILED for {solver}: the extrapolated radial expansion is outside the "
+                f"closed form's tolerance.",
+                file=sys.stderr,
+            )
+            exit_code = 1
+        try:
+            axial = curved_compare.assert_axial_contraction(extrapolated[solver])
+        except curved_compare.AxialRestraintPresent as exc:
+            print(f"HAND CHECK FAILED for {solver} (axial): {exc}", file=sys.stderr)
+            exit_code = 1
+        else:
+            at_end = extrapolated[solver].component(curved_model.AXIAL_PROBE, "u3")
+            print(
+                f"  hand check 2 (axial): slope {axial['slope']:.12e} against -nu p r/(E t) = "
+                f"{curved_hand_check.axial_strain():.12e} -> rel {axial['relative']:.3e}, "
+                f"nonlinearity over {len(curved_model.PROBE_POINTS) - 2} probes "
+                f"{axial['worst_nonlinearity']:.3e}, u3({curved_model.AXIAL_PROBE}) "
+                f"{at_end:.12e} against {axial_closed:.12e}  PASS"
+            )
+
+    print(f"\n--- extrapolated tables, rel_tol {rel_tol:.1e}")
+    try:
+        report = compare.compare(extrapolated["sestra"], extrapolated["abaqus"], rel_tol=rel_tol)
+    except (compare.ProbeSetMismatch, compare.NoSignal) as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(report.format_table())
+    if not report.ok:
+        print(
+            f"CROSS-SOLVER COMPARISON FAILED (extrapolated): {len(report.failures)} component(s) "
+            f"outside {rel_tol:.1e}.",
+            file=sys.stderr,
+        )
+        exit_code = 1
+
+    finest_tol = curved_compare.CURVED_MESH_REL_TOL
+    print(f"\n--- finest grid only, rel_tol {finest_tol:.1e} (diagnostic)")
+    finest = compare.compare(solves["sestra"][-1].table, solves["abaqus"][-1].table, rel_tol=finest_tol)
+    worst = finest.worst
+    print(
+        f"{len(finest.diffs)} components, {len(finest.failures)} failed; worst significant "
+        + (f"{worst.probe}.{worst.component} rel {worst.rel_diff:.3e}" if worst else "(none)")
+    )
+    print(
+        "the extrapolated and single-grid residuals are the same size here, and that is the "
+        "finding rather than an oversight -- see step 3 of curved_compare's docstring: the "
+        "residual is an S4R orientation asymmetry that is not a single-rate term, so the "
+        "extrapolation removes none of it. What it does remove is each solver's own distance "
+        "from the closed form."
+    )
+
+    error = curved_abaqus_runner.writer_pressure_error()
+    print(
+        f"\nwriter defect, measured: AnalysisPlan.applied_pressure computes "
+        f"{curved_abaqus_runner.writer_pressure_resultant()!r} for this panel and "
+        f"integral(p n dA) is {curved_abaqus_runner.exact_pressure_resultant()!r} -- worst "
+        f"component off by {error['worst_component_error']:.6g} N ({error['relative']:.3e}), and "
+        f"{error['skew']:.3e} asymmetric where the panel is symmetric to the last bit. That is why "
+        f"the emitted script is asked not to submit and the solve is appended."
+    )
+    for solver in ("abaqus",):
+        checks = curved_abaqus_runner.read_checks(
+            pathlib.Path(args.work_dir) / curved_abaqus_runner.run_dir_name(curved_model.MESH_COUNTS[-1])
+        )
+        print(
+            f"  the same formula on the solved model would have left a residual of "
+            f"{checks.residual_with_writer_formula:.6g} N; CAE's own getSize() for the face is "
+            f"{checks.face_area!r} against adapy's {curved_model.face_area()!r} "
+            f"(rel {abs(checks.face_area / curved_model.face_area() - 1.0):.3e}), and the regions "
+            f"came out {checks.region_kinds}"
+        )
+
+    if args.measure_pressure_sign:
+        try:
+            sign = curved_abaqus_runner.measure_pressure_sign(args.work_dir)
+        except (abaqus_runner.AbaqusNotInstalled, abaqus_runner.AbaqusFailed, OSError) as exc:
+            print(f"ERROR: the pressure-sign measurement could not be run: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"\npressure sign on the curved face: with magnitude {sign['magnitude']:+.6g} Pa the "
+            f"radial displacement at {curved_model.RADIAL_PROBE} is {sign['radial_at_probe']:+.6e} m "
+            f"and the x reaction {sign['reaction_x']:+.6g} N -- so a POSITIVE Pressure magnitude "
+            f"acts into side1Faces, i.e. against the face's own outward radial normal, and "
+            f"curved_model.SIGNED_PRESSURE_MAGNITUDE is negative for an internal pressure."
+        )
+        for key in sorted(curved_abaqus_runner.PRESSURE_SIGN_MEASUREMENT):
+            print(f"  {key:<36} {curved_abaqus_runner.PRESSURE_SIGN_MEASUREMENT[key]}")
+
+    if exit_code == 0:
+        print(
+            f"\ncurved case passed: both extrapolants land on p r^2/(E t) within "
+            f"{curved_hand_check.RADIAL_REL_TOL:.1e} and on -nu p r z/(E t) within "
+            f"{curved_hand_check.AXIAL_REL_TOL:.1e}, and they agree with each other at rel "
+            f"{rel_tol:.1e}."
+        )
     return exit_code
 
 

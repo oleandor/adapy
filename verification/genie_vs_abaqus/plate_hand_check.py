@@ -285,7 +285,13 @@ def observed_order(values, *, refinement: float = REFINEMENT) -> float:
     return math.log(abs(d1 / d2)) / math.log(refinement)
 
 
-def richardson(values, *, order: float | None = None, refinement: float = REFINEMENT) -> Convergence:
+def richardson(
+    values,
+    *,
+    order: float | None = None,
+    refinement: float = REFINEMENT,
+    order_band: tuple[float, float] = ORDER_BAND,
+) -> Convergence:
     """Richardson-extrapolate three values, coarse to fine, and report what it took.
 
     ``v_inf = v2 + (v2 - v1) / (refinement**p - 1)``, with ``p`` from
@@ -293,19 +299,24 @@ def richardson(values, *, order: float | None = None, refinement: float = REFINE
     the order, the extrapolant and how far the finest mesh still was from it -- all three,
     because an extrapolant on its own hides whether it was an extrapolation or a guess.
 
-    Raises :class:`NotConverging` when the measured order falls outside :data:`ORDER_BAND`.
+    Raises :class:`NotConverging` when the measured order falls outside ``order_band``, which
+    defaults to :data:`ORDER_BAND` -- the band this model's own three meshes set. It is a
+    parameter rather than only a module constant because the curved case
+    (:data:`curved_compare.CURVED_ORDER_BAND`) measures a wider scatter on one of its two
+    solvers and has to state its own band from its own numbers; every caller that does not pass
+    one still gets the plate strip's.
     """
     sequence = tuple(float(v) for v in values)
     measured = observed_order(sequence, refinement=refinement)
     if order is None:
-        low, high = ORDER_BAND
+        low, high = order_band
         if not low <= measured <= high:
             raise NotConverging(
                 f"the sequence {sequence} converges at order {measured:.4f}, outside the "
-                f"admissible band {ORDER_BAND}. Both solvers measure 2.0 on this model, so a rate "
-                f"this far off means the three values are not one converging sequence -- an "
-                f"element that locks, a mesh that was not refined, or a support that moved between "
-                f"runs. Extrapolating it would invent a limit."
+                f"admissible band {tuple(order_band)}. Both solvers measure 2.0 on the plate "
+                f"strip, so a rate this far off means the three values are not one converging "
+                f"sequence -- an element that locks, a mesh that was not refined, or a support "
+                f"that moved between runs. Extrapolating it would invent a limit."
             )
         order = measured
     denominator = refinement**order - 1.0

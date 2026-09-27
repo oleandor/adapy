@@ -160,12 +160,19 @@ EQUILIBRIUM_REL_TOL = 1.0e-04
 #:                              the **outward radial** direction (adapy's own
 #:                              ``thickness_direction()`` reads ``(0.7071, 0.7071, 0.0)`` at the
 #:                              mid-face). A positive magnitude acts *into* side1, i.e. inwards, and
-#:                              **contracts** the shell. Measured on this panel at ``n = 8`` with
-#:                              ``magnitude=+1e5``: ``u1`` at ``T0_MID`` came out
-#:                              ``-1.8935...e-04``, i.e. the panel collapsed inwards, and the
-#:                              reaction total reversed sign with it. With
-#:                              ``magnitude=-1e5`` (:data:`curved_model.SIGNED_PRESSURE_MAGNITUDE`)
-#:                              it expands, which is what an internal pressure must do.
+#:                              **contracts** the shell. Measured on this panel at ``n = 8`` by
+#:                              solving it twice and reading the **reaction total's sign**:
+#:                              ``magnitude=-1e5`` gives ``(-628318.555, -628318.559, -0.005)`` and
+#:                              ``magnitude=+1e5`` gives ``(+628318.555, +628318.559, +0.005)``. The
+#:                              reactions flip with the magnitude, so a positive one pulls the panel
+#:                              in and the negative one
+#:                              (:data:`curved_model.SIGNED_PRESSURE_MAGNITUDE`) expands it, which is
+#:                              what an internal pressure must do. The reversed run's own
+#:                              *displacements* were never read, and that is stated rather than
+#:                              glossed: the driver's equilibrium check -- rightly -- fails that run
+#:                              by ``2 p r L = 1256637.089`` N and writes no displacement sidecar, so
+#:                              :func:`measure_pressure_sign` reads the reaction it recorded on the
+#:                              way down.
 #: Sesam ``BEUSLO``             not run here, and stated as not run: #404 was not merged (see
 #:                              :mod:`curved_sestra_runner`). Its own measurement, quoted from that
 #:                              branch, is that a BEUSLO intensity pushes along the element's

@@ -22,19 +22,19 @@ import {activeViewport} from "@/viewport/api/viewportApi";
 export function watchCameraHomeOnEmpty(): () => void {
     const empty = () => useModelState.getState().loadedSourceNames.size === 0;
     let wasLoaded = !empty();
-    let emptiedByReplace = false;
+    let wasEmptiedByReplace = false;
     const stopModel = useModelState.subscribe((state) => {
         const isLoaded = state.loadedSourceNames.size > 0;
         if (wasLoaded && !isLoaded) {
-            if (sceneReplacing()) emptiedByReplace = true;
+            if (sceneReplacing()) wasEmptiedByReplace = true;
             else activeViewport()?.resetCamera();
         }
         wasLoaded = isLoaded;
     });
     const stopReplace = onSceneReplaceEnd(() => {
         // A replace that brought nothing in (it failed) left the scene empty after all.
-        if (emptiedByReplace && empty()) activeViewport()?.resetCamera();
-        emptiedByReplace = false;
+        if (wasEmptiedByReplace && empty()) activeViewport()?.resetCamera();
+        wasEmptiedByReplace = false;
     });
     return () => {
         stopModel();

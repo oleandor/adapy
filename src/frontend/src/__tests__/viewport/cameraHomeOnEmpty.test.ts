@@ -46,10 +46,15 @@ test("a replace load keeps the camera: the scene is empty only on its way to the
       useModelState.getState().setLoadedSourceName("procedural:frame");
     });
     assert.equal(resets, 0, "the replaced model came back: the camera stays");
-    // A replace that brought nothing in left the scene empty after all.
-    await duringSceneReplace(async () => {
-      useModelState.getState().clearLoadedSources();
-    }).catch(() => undefined);
+    // A replace that failed after tearing the scene down left it empty after all.
+    useModelState.getState().setLoadedSourceName("procedural:frame");
+    await assert.rejects(
+      duringSceneReplace(async () => {
+        useModelState.getState().clearLoadedSources();
+        throw new Error("compile failed");
+      }),
+      /compile failed/,
+    );
     assert.equal(resets, 1, "empty when the replace ended: the camera goes home");
   } finally {
     stop();

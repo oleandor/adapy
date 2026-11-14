@@ -32,6 +32,9 @@ export interface DimensionLine {
     sides: [number, number];
 }
 
+/** Per axis, the two axes across it. */
+const OTHER_AXES = [[1, 2], [0, 2], [0, 1]] as const;
+
 /**
  * Where the three dimension lines go for `cell` seen from `eye` (both in the cell's own
  * frame): per axis, the box edge parallel to it on the camera's side of the two other
@@ -40,7 +43,7 @@ export interface DimensionLine {
 export function dimensionLines(cell: CellBox, eye: Vec3, gap: number): DimensionLine[] {
     const out: DimensionLine[] = [];
     for (const axis of [0, 1, 2] as const) {
-        const others = [0, 1, 2].filter((a) => a !== axis) as [number, number];
+        const others = OTHER_AXES[axis];
         const from: Vec3 = [0, 0, 0];
         const to: Vec3 = [0, 0, 0];
         const sides: [number, number] = [1, 1];
@@ -61,13 +64,26 @@ export function dimensionLines(cell: CellBox, eye: Vec3, gap: number): Dimension
 
 const LABEL_W = 256;
 const LABEL_H = 64;
+/** The label plate behind the length: the cell builder's readout colour. */
+const LABEL_PLATE = "rgba(17,24,39,0.86)";
+/** A label's sprite scale with `sizeAttenuation` off: about constant on screen, as the numeric readout. */
+const LABEL_SCALE: readonly [number, number] = [0.12, 0.03];
+/** Lines and arrowheads draw at the numeric readout's order, and the labels over them, so a
+ *  number is never under a line. */
+const LINE_RENDER_ORDER = 7;
+const LABEL_RENDER_ORDER = 8;
 
 function labelTexture(text: string, color: number): THREE.CanvasTexture {
     const canvas = document.createElement("canvas");
     canvas.width = LABEL_W;
     canvas.height = LABEL_H;
-    const g = canvas.getContext("2d")!;
-    g.fillStyle = "rgba(17,24,39,0.86)";
+    const tex = new THREE.CanvasTexture(canvas);
+    // The canvas is sRGB: said so, the dark plate and the axis colour come out as drawn.
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const g = canvas.getContext("2d");
+    // No 2D context (a canvas the browser refuses): a blank label beats no dimension line.
+    if (!g) return tex;
+    g.fillStyle = LABEL_PLATE;
     const r = 12;
     g.beginPath();
     g.moveTo(r, 2);
@@ -81,9 +97,6 @@ function labelTexture(text: string, color: number): THREE.CanvasTexture {
     g.textAlign = "center";
     g.textBaseline = "middle";
     g.fillText(text, LABEL_W / 2, LABEL_H / 2 + 2);
-    const tex = new THREE.CanvasTexture(canvas);
-    // The canvas is sRGB: said so, the dark plate and the axis colour come out as drawn.
-    tex.colorSpace = THREE.SRGBColorSpace;
     tex.needsUpdate = true;
     return tex;
 }
@@ -92,12 +105,15 @@ function labelTexture(text: string, color: number): THREE.CanvasTexture {
 export function disposeCellDimensions(ctx: CellBuilderScene): void {
     const group = ctx.dimensionGroup;
     for (let i = group.children.length - 1; i >= 0; i--) {
-        const o = group.children[i] as THREE.Mesh | THREE.Line | THREE.Sprite;
-        // A sprite's geometry is three's shared quad: leave it.
-        if (!(o instanceof THREE.Sprite)) o.geometry.dispose();
-        const m = o.material as THREE.SpriteMaterial | THREE.Material;
-        if ("map" in m && m.map) m.map.dispose();
-        m.dispose();
+        const o = group.children[i];
+        if (o instanceof THREE.Sprite) {
+            // A sprite's geometry is three's shared quad: leave it.
+            o.material.map?.dispose();
+            o.material.dispose();
+        } else if (o instanceof THREE.Mesh || o instanceof THREE.Line) {
+            o.geometry.dispose();
+            for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.dispose();
+        }
         group.remove(o);
     }
     group.visible = false;
@@ -121,7 +137,7 @@ export function syncCellDimensions(ctx: CellBuilderScene, cell: CellBox | null, 
     const group = ctx.dimensionGroup;
     const maxSize = Math.max(...cell.size);
     const lines = dimensionLines(cell, eye, gap);
-    const parts: {line: THREE.Line; heads: [THREE.Mesh, THREE.Mesh]; label: THREE.Sprite}[] = [];
+    const parts: {line: THREE.Line; heads: [THREE.Mesh, THREE.Mesh]; headLen: number; label: THREE.Sprite}[] = [];
     for (const d of lines) {
         const color = HANDLE_AXIS_COLOR[d.axis];
         const geom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...d.from), new THREE.Vector3(...d.to)]);
@@ -136,7 +152,7 @@ export function syncCellDimensions(ctx: CellBuilderScene, cell: CellBox | null, 
             }),
         );
         line.computeLineDistances();
-        line.renderOrder = 7;
+        line.renderOrder = LINE_RENDER_ORDER;
         line.frustumCulled = false;
         // Arrowheads: cones pointing out along the axis, sized to the box (and to the line,
         // so a thin cell keeps a visible shaft).
@@ -146,7 +162,7 @@ export function syncCellDimensions(ctx: CellBuilderScene, cell: CellBox | null, 
                 new THREE.ConeGeometry(headLen * 0.35, headLen, 12),
                 new THREE.MeshBasicMaterial({color, depthTest: false, transparent: true}),
             );
-            cone.renderOrder = 7;
+            cone.renderOrder = LINE_RENDER_ORDER;
             cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3().setComponent(d.axis, outward));
             return cone;
         };
@@ -160,23 +176,22 @@ export function syncCellDimensions(ctx: CellBuilderScene, cell: CellBox | null, 
                 toneMapped: false,
             }),
         );
-        label.scale.set(0.12, 0.03, 1); // ~constant screen size, like the numeric readout
-        label.renderOrder = 8;
+        label.scale.set(LABEL_SCALE[0], LABEL_SCALE[1], 1);
+        label.renderOrder = LABEL_RENDER_ORDER;
         for (const o of [line, ...heads, label]) {
             o.userData.__excludeFromFit = true;
             group.add(o);
         }
-        parts.push({line, heads, label});
+        parts.push({line, heads, headLen, label});
     }
     const place = (ds: DimensionLine[]) => {
         ds.forEach((d, i) => {
-            const {line, heads, label} = parts[i];
-            const pos = line.geometry.getAttribute("position") as THREE.BufferAttribute;
+            const {line, heads, headLen, label} = parts[i];
+            const pos = line.geometry.getAttribute("position");
             pos.setXYZ(0, ...d.from);
             pos.setXYZ(1, ...d.to);
             pos.needsUpdate = true;
             line.computeLineDistances();
-            const headLen = (heads[0].geometry as THREE.ConeGeometry).parameters.height;
             const a = new THREE.Vector3(...d.from);
             const b = new THREE.Vector3(...d.to);
             const along = new THREE.Vector3().setComponent(d.axis, headLen / 2);

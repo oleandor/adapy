@@ -25,10 +25,10 @@ test("the command toggles the projection and shows it as checked", () => {
     assert.equal(spec.disabledReason?.() ?? null, null, "the three.js viewport draws it");
     assert.equal(spec.checked?.(), false);
     spec.run();
-    assert.equal(useProjectionStore.getState().isOrthographic, true);
+    assert.equal(useProjectionStore.getState().orthographic, true);
     assert.equal(spec.checked?.(), true);
     spec.run();
-    assert.equal(useProjectionStore.getState().isOrthographic, false);
+    assert.equal(useProjectionStore.getState().orthographic, false);
   } finally {
     release();
   }

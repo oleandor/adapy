@@ -431,7 +431,7 @@ export function coreCommandSpecs(): CommandSpec[] {
       id: ID.orthographic,
       label: "Orthographic view",
       group: "View",
-      checked: () => useProjectionStore.getState().isOrthographic,
+      checked: () => useProjectionStore.getState().orthographic,
       // The three.js viewport draws it on either renderer (utils/scene/orthographicProjection.ts).
       disabledReason: () => noViewport() ?? activeViewport()?.unavailable("orthographic") ?? null,
       run: () => {

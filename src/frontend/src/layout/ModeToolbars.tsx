@@ -139,7 +139,7 @@ export function sectionOffset(
 export function SectionToolbar({className = BAR}: {className?: string}) {
   // Re-render on every change to the planes, and to the projection.
   useStore(useSectionStore);
-  useProjectionStore((s) => s.isOrthographic);
+  useProjectionStore((s) => s.orthographic);
   const box = useModelState((s) => s.boundingBox);
   const plane = workingPlane();
   const {sign, offset, lo, hi} = sectionOffset(plane, box);

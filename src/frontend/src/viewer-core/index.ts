@@ -654,7 +654,11 @@
 //   1.23.0  `setBuilderDefaults`: a shell's default engine and blueprint for a Builder model
 //          whose doc names none. `notifyPluginActivationChanged`: a plugin says what its activation predicate reads
 //          has changed; a placed panel re-asks it (and on every loaded-model change).
-export const VIEWER_CORE_API_VERSION = "1.23.0";
+//   1.24.0 Kept in step with PLUGIN_API_VERSION 1.24.0. Additive: `CORE_COMMAND_IDS.orthographic`
+//          (`core:view.orthographic`, the Orthographic view toggle: the section toolbar's first
+//          button and the Desktop UI's Camera menu). Offered disabled, with the reason, on a
+//          viewport whose `unavailable("orthographic")` answers one (the three.js-free viewport).
+export const VIEWER_CORE_API_VERSION = "1.24.0";
 
 // ---------------------------------------------------------------------------
 // Plugin declaration. `registerPlugin` is how a package announces itself —

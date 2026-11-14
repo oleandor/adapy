@@ -508,6 +508,10 @@ These are open design points, ordered by how much of the viewer depends on them.
 6. **Controls parity.** The renderer's camera covers orbit, pan, zoom, zoom towards the cursor, fit
    to the model or the selection, named views and the user's input mapping. Still the main
    viewer's only: the orientation gizmo, orthographic projection as a setting, and 3D-mouse input.
+   The projection setting is plain data (`state/projectionStore`). This viewport answers
+   `unavailable("orthographic")`, so the Orthographic view command is offered disabled here. The
+   renderer's camera can project orthographically (`cameraSetOrthographic`); what is missing is
+   sizing the screen-sized billboards, and hit-testing their clicks, for that projection.
 7. **Uses of three.js outside the main viewport.** The equipment preview, the cell builder, the
    robot (STL) loader, the FEA GLB assembly (`GLTFLoader` / `GLTFExporter` used to build data, not
    to draw) and the three.js embed each need a decision of their own: ported, exempt, or dropped.

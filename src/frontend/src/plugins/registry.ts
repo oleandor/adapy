@@ -192,7 +192,9 @@ import { isPlacedElsewhere } from "@/layout/placedElsewhere";
 //          `notifyPluginActivationChanged()`: a plugin whose activation predicate reads its own
 //          state says when that state changed, and a placed panel showing "Nothing to show
 //          here yet" re-asks it (the panel also re-asks on every loaded-model change).
-export const PLUGIN_API_VERSION = "1.23.0";
+// 1.24.0 — kept in step with viewer-core 1.24.0: `CORE_COMMAND_IDS.orthographic`
+//          (`core:view.orthographic`), a command a plugin may run or place. Additive.
+export const PLUGIN_API_VERSION = "1.24.0";
 
 // The named mount regions core exposes in Phase 1. Deliberately small
 // (`fem-sidebar` covers the FEM simulation panel, `top-panel` the menu bar,

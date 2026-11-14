@@ -25,6 +25,16 @@ stiffeners and decks, organised the way the model's parts are.
 
 ![An IFC model opened from storage, with its object tree](screenshots/ada-studio/model.png)
 
+The view is in perspective. **Orthographic view**, the first button of the section toolbar and
+in the Desktop UI's **View → Camera** menu, draws it with parallel edges instead: the model is
+as tall at the orbit target as it was, zoom and the named views work as before, and labels keep
+their size on screen. The choice is remembered in this browser. The three.js-free viewport has
+no orthographic view yet, so the command is greyed there and its tooltip says so.
+
+A load that replaces the model on screen keeps the camera where you had it: a compile showing
+its result again, for one. The camera goes back to its starting view only when the scene is
+left empty.
+
 ## Select and inspect
 
 Click a member in the tree or in the 3D view to select it. **Selected Object Info** shows its
@@ -166,6 +176,8 @@ the default. Your rail is saved with your layout.
   read it.
 - **Procedural models:** cell-model documents compiled into structures, equipment and routed
   systems by the [topology engine](architecture/topology_engine.md), with equipment and system catalogs.
+  While the cell builder's resize gizmo (**S**) is on, the selected cell shows its three
+  dimensions on the edges facing you, updated as you drag.
 - **Plugins:** UI shells, panels and URL handlers on the frontend side, and plugin backends,
   artefact contributors and job kinds on the worker side.
 - **Administration:** users, projects, storage, workers, scheduled audits of conversions,

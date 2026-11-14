@@ -10,13 +10,17 @@
 // named view frames as before, a pan moves by the same amount.
 //
 // What a projection alone does not carry, done here:
-//  - the projection follows the distance every frame (a dolly does not ask for it);
+//  - the projection follows the distance every frame (a dolly does not ask for it). The frame
+//    loop asks for it before either renderer draws (`beforeDraw`), not from inside a
+//    WebGLRenderer call: the adacpp WebGPU renderer draws without one;
 //  - a ray from the pointer is parallel to the view, not from the eye (Raycaster);
 //  - a sprite drawn at a constant screen size (`sizeAttenuation: false`: labels, snap markers,
 //    the cell builder's readouts) is sized from its depth by the shader in perspective only, so
-//    it is given that size here instead.
+//    it is given that size here instead. adacpp's sprite shader does the same as three.js, so
+//    SceneSync gives the sprites it hands over that size too (viewport/adacpp/sceneSync.ts).
 
 import * as THREE from "three";
+import {followProjection} from "@/state/projectionStore";
 
 /** Half the height the view shows at `distance` with a vertical field of view of `fovDeg`. */
 export function orthoHalfHeight(distance: number, fovDeg: number): number {
@@ -29,7 +33,8 @@ const DISTANCE = "__orthoDistance";
 /** Whether `camera` draws orthographically now (an OrthographicCamera, or ours in that mode). */
 export function isOrthographic(camera: THREE.Camera | null | undefined): boolean {
     if (!camera) return false;
-    return (camera as THREE.OrthographicCamera).isOrthographicCamera === true || camera.userData?.[ORTHO] === true;
+    if ("isOrthographicCamera" in camera && camera.isOrthographicCamera === true) return true;
+    return camera.userData?.[ORTHO] === true;
 }
 
 /** The camera's orthographic projection for a target `distance` away (or its perspective one). */
@@ -49,15 +54,15 @@ export function updateProjection(camera: THREE.PerspectiveCamera, orthographic: 
     camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
 }
 
-let raycastPatched = false;
+let isRaycasterPatched = false;
 
 /** Rays from the pointer through an orthographic view of our camera: parallel, from far behind. */
 function patchRaycaster(): void {
-    if (raycastPatched) return;
-    raycastPatched = true;
+    if (isRaycasterPatched) return;
+    isRaycasterPatched = true;
     const original = THREE.Raycaster.prototype.setFromCamera;
     THREE.Raycaster.prototype.setFromCamera = function (this: THREE.Raycaster, coords: THREE.Vector2, camera: THREE.Camera) {
-        if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera && camera.userData?.[ORTHO] === true) {
+        if (camera instanceof THREE.PerspectiveCamera && camera.userData?.[ORTHO] === true) {
             this.ray.origin.set(coords.x, coords.y, -1).unproject(camera);
             this.ray.direction.set(0, 0, -1).transformDirection(camera.matrixWorld);
             this.camera = camera;
@@ -75,10 +80,10 @@ const view = new THREE.Vector3();
  * is in perspective (the shader multiplies its scale by its depth there, and not here).
  */
 export function sizeSpriteForView(sprite: THREE.Sprite, camera: THREE.Camera): void {
-    const material = sprite.material as THREE.SpriteMaterial;
-    const base = sprite.userData[BASE_SCALE] as THREE.Vector3 | undefined;
-    const ortho = camera.userData?.[ORTHO] === true && material.sizeAttenuation === false;
-    if (!ortho) {
+    const stored: unknown = sprite.userData[BASE_SCALE];
+    const base = stored instanceof THREE.Vector3 ? stored : undefined;
+    const isScreenSized = camera.userData?.[ORTHO] === true && sprite.material.sizeAttenuation === false;
+    if (!isScreenSized) {
         if (base) {
             sprite.scale.copy(base);
             delete sprite.userData[BASE_SCALE];
@@ -91,16 +96,17 @@ export function sizeSpriteForView(sprite: THREE.Sprite, camera: THREE.Camera): v
     // In perspective it covers scale / tan(fov / 2) of the half-height wherever it is; here the
     // half-height is distance * tan(fov / 2): so scale * distance.
     view.setFromMatrixPosition(sprite.matrixWorld);
-    const distance = (camera.userData[DISTANCE] as number | undefined) ?? camera.position.distanceTo(view);
+    const known: unknown = camera.userData[DISTANCE];
+    const distance = typeof known === "number" ? known : camera.position.distanceTo(view);
     sprite.scale.set(from.x * distance, from.y * distance, from.z);
     sprite.updateMatrixWorld();
 }
 
-let spritesPatched = false;
+let areSpritesPatched = false;
 
 function patchSprites(): void {
-    if (spritesPatched) return;
-    spritesPatched = true;
+    if (areSpritesPatched) return;
+    areSpritesPatched = true;
     const own = THREE.Sprite.prototype.onBeforeRender;
     THREE.Sprite.prototype.onBeforeRender = function (this: THREE.Sprite, renderer, scene, camera, geometry, material, group) {
         sizeSpriteForView(this, camera);
@@ -110,10 +116,11 @@ function patchSprites(): void {
 
 /** What the controls orbit round: OrbitControls' `target`, or camera-controls' `getTarget`. */
 export function controlsTarget(controls: unknown): THREE.Vector3 | null {
-    const c = controls as {target?: THREE.Vector3; getTarget?: (out: THREE.Vector3) => THREE.Vector3} | null;
-    if (!c) return null;
-    if (c.target instanceof THREE.Vector3) return c.target;
-    return typeof c.getTarget === "function" ? c.getTarget(new THREE.Vector3()) : null;
+    if (typeof controls !== "object" || controls === null) return null;
+    if ("target" in controls && controls.target instanceof THREE.Vector3) return controls.target;
+    if (!("getTarget" in controls) || typeof controls.getTarget !== "function") return null;
+    const target: unknown = controls.getTarget(new THREE.Vector3());
+    return target instanceof THREE.Vector3 ? target : null;
 }
 
 /**
@@ -129,9 +136,8 @@ export function bindOrthographic(
     patchRaycaster();
     patchSprites();
     const apply = () => {
-        const on = orthographic();
         const t = target();
-        updateProjection(camera, on, t ? camera.position.distanceTo(t) : camera.position.length());
+        updateProjection(camera, orthographic(), t ? camera.position.distanceTo(t) : camera.position.length());
     };
     // Whoever asks for the projection (a resize, a fit, the clip range) gets the right one.
     const own = camera.updateProjectionMatrix;
@@ -147,5 +153,41 @@ export function bindOrthographic(
         camera.updateProjectionMatrix = own;
         scene.onBeforeRender = before;
         updateProjection(camera, false, 0);
+    };
+}
+
+/** The orthographic view bound to a viewport: what its frame loop calls, and the undo. */
+export interface OrthographicView {
+    /** Each frame, after the controls moved the camera and before either renderer draws. */
+    beforeDraw(): void;
+    release(): void;
+}
+
+/**
+ * The three.js viewport's camera following the projection setting (state/projectionStore):
+ * switched when the setting changes (then `onChange`, to draw a frame), and kept in step with
+ * the camera's distance by `beforeDraw` on every frame, whichever renderer draws it.
+ */
+export function installOrthographicView(
+    scene: THREE.Scene,
+    camera: THREE.PerspectiveCamera,
+    target: () => THREE.Vector3 | null,
+    onChange: () => void,
+): OrthographicView {
+    let isOn = false;
+    const release = bindOrthographic(scene, camera, target, () => isOn);
+    const stopFollowing = followProjection((on) => {
+        isOn = on;
+        camera.updateProjectionMatrix();
+        onChange();
+    });
+    return {
+        beforeDraw: () => {
+            if (isOn || camera.userData[ORTHO] === true) camera.updateProjectionMatrix();
+        },
+        release: () => {
+            stopFollowing();
+            release();
+        },
     };
 }

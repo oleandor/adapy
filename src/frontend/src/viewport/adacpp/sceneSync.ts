@@ -7,7 +7,7 @@ import {CustomBatchedMesh} from "@/utils/mesh_select/CustomBatchedMesh";
 import {selectedMaterial} from "@/utils/default_materials";
 import {lightIntensities, useAppearanceStore} from "@/state/appearanceStore";
 import {resultDrawnFlat} from "@/utils/scene/fea/threeResultLook";
-import {isOrthographic} from "@/utils/scene/orthographicProjection";
+import {isOrthographic, sizeSpriteForView} from "@/utils/scene/orthographicProjection";
 import {quadMatrix} from "@/viewport/native/nativeImages";
 import {InstanceFlag, NO_TEXTURE, SegmentFlag, SpriteFlag, Topology, type AdacppModule, type WebRendererApi} from "./types";
 
@@ -278,7 +278,7 @@ export class SceneSync {
                     return;
                 }
                 if (o.isSprite) {
-                    this.syncSprite(obj as THREE.Sprite);
+                    this.syncSprite(obj as THREE.Sprite, camera);
                     return;
                 }
                 // Not a sprite: mirrored like any other object, but over the model.
@@ -366,9 +366,12 @@ export class SceneSync {
 
     /** A three.js Sprite as a renderer sprite: its map's pixels as a texture (uploaded again when the
      *  texture's version moves, as a relabelled canvas does), placed and sized as three.js would. */
-    private syncSprite(sprite: THREE.Sprite): void {
+    private syncSprite(sprite: THREE.Sprite, camera: THREE.Camera): void {
         const mat = sprite.material;
         if (!mat.visible) return;
+        // three.js sizes a constant-size sprite for an orthographic view in the sprite's
+        // onBeforeRender (orthographicProjection.ts), which nothing calls here.
+        sizeSpriteForView(sprite, camera);
         try {
             const texture = this.syncTexture(mat.map);
             let entry = this.sprites.get(sprite.uuid);

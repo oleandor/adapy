@@ -6,9 +6,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as THREE from "three";
 
-const { bindOrthographic, isOrthographic, orthoHalfHeight, sizeSpriteForView } = await import(
+const { bindOrthographic, installOrthographicView, isOrthographic, orthoHalfHeight, sizeSpriteForView } = await import(
   "@/utils/scene/orthographicProjection"
 );
+const { useProjectionStore } = await import("@/state/projectionStore");
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);
 
@@ -106,4 +107,36 @@ test("a constant-size sprite keeps its size on screen, and its scale when switch
   set(true);
   sizeSpriteForView(world, camera);
   near(world.scale.x, 1);
+});
+
+test("bound to the setting, the frame loop keeps the view in step with a dolly: no WebGLRenderer call needed", () => {
+  // The adacpp WebGPU renderer draws without WebGLRenderer.render, so scene.onBeforeRender never
+  // runs there: the frame loop's beforeDraw is what follows the camera's distance.
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, 2, 0.1, 1000);
+  camera.position.set(0, 0, 10);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld();
+  const target = new THREE.Vector3();
+  let frames = 0;
+  useProjectionStore.getState().setOrthographic(false);
+  const view = installOrthographicView(scene, camera, () => target, () => void frames++);
+  try {
+    assert.ok(!isOrthographic(camera));
+    useProjectionStore.getState().setOrthographic(true);
+    assert.ok(isOrthographic(camera), "the setting switches the camera");
+    assert.equal(frames, 2, "and asks for a frame (once when bound, once on the switch)");
+    camera.position.set(0, 0, 4); // a dolly: nothing asks for the projection
+    camera.updateMatrixWorld();
+    view.beforeDraw();
+    near(new THREE.Vector3(0, orthoHalfHeight(4, 60), 0).project(camera).y, 1);
+    useProjectionStore.getState().setOrthographic(false);
+    assert.ok(!isOrthographic(camera));
+  } finally {
+    view.release();
+    useProjectionStore.getState().setOrthographic(false);
+  }
+  useProjectionStore.getState().setOrthographic(true);
+  assert.ok(!isOrthographic(camera), "released: the camera no longer follows the setting");
+  useProjectionStore.getState().setOrthographic(false);
 });

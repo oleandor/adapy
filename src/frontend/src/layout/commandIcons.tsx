@@ -137,7 +137,7 @@ export const EdgesIcon = glyph(
 export const OrthographicIcon = glyph(
   <>
     <rect x="4" y="8" width="12" height="12" />
-    <path d="M4 8l4-4h12v12l-4 4M16 8l4-4M16 8v0" />
+    <path d="M4 8l4-4h12v12l-4 4M16 8l4-4" />
   </>,
   "Orthographic",
 );

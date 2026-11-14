@@ -1,36 +1,43 @@
 // The 3D view's projection: perspective (the default) or orthographic. One setting for the
-// page, remembered in this browser; the three.js viewport follows it
-// (utils/scene/orthographicProjection.ts). No three.js here: the three.js-free viewport's
-// chunk may read it.
+// page, remembered in this browser through the store's `persist` middleware. The three.js
+// viewport follows it (utils/scene/orthographicProjection.ts). The three.js-free viewport says
+// it has no orthographic view yet (`ViewportApi.unavailable("orthographic")`), and the command
+// is offered disabled there. No three.js here, so that chunk may import it.
 
 import {create} from "zustand";
+import {persist} from "zustand/middleware";
 
-const KEY = "ada:camera-projection";
-
-const read = (): boolean => {
-    try {
-        return window.localStorage.getItem(KEY) === "orthographic";
-    } catch {
-        return false;
-    }
-};
+/** The localStorage entry the setting is kept under. */
+export const PROJECTION_STORAGE_KEY = "ada:camera-projection";
 
 interface ProjectionState {
-    orthographic: boolean;
+    isOrthographic: boolean;
     setOrthographic(on: boolean): void;
-    toggle(): void;
+    toggleOrthographic(): void;
 }
 
-export const useProjectionStore = create<ProjectionState>((set, get) => ({
-    orthographic: typeof window === "undefined" ? false : read(),
-    setOrthographic: (on) => {
-        try {
-            if (on) window.localStorage.setItem(KEY, "orthographic");
-            else window.localStorage.removeItem(KEY);
-        } catch {
-            // Private window or blocked storage: the choice lasts this page.
-        }
-        set({orthographic: on});
-    },
-    toggle: () => get().setOrthographic(!get().orthographic),
-}));
+export const useProjectionStore = create<ProjectionState>()(
+    persist(
+        (set, get) => ({
+            isOrthographic: false,
+            setOrthographic: (on) => set({isOrthographic: on}),
+            toggleOrthographic: () => set({isOrthographic: !get().isOrthographic}),
+        }),
+        {
+            name: PROJECTION_STORAGE_KEY,
+            version: 1,
+            partialize: (s) => ({isOrthographic: s.isOrthographic}),
+        },
+    ),
+);
+
+/**
+ * Call `apply` with the projection now, and again each time it changes; returns the
+ * unsubscribe. How a viewport keeps its camera in step with the setting.
+ */
+export function followProjection(apply: (isOrthographic: boolean) => void): () => void {
+    apply(useProjectionStore.getState().isOrthographic);
+    return useProjectionStore.subscribe((now, before) => {
+        if (now.isOrthographic !== before.isOrthographic) apply(now.isOrthographic);
+    });
+}

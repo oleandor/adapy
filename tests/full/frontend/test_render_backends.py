@@ -90,6 +90,23 @@ def _is_model(px) -> bool:  # the default light grey of an unpainted model, agai
     return min(px) > 150 and max(px) - min(px) < 25
 
 
+def _diag_map(image: Image.Image, label: str) -> None:  # DEBUG ONLY (not for merge)
+    """A coarse character map of the frame and its most common colours."""
+    small = image.resize((80, 40))
+    rows = []
+    for y in range(small.height):
+        row = ""
+        for x in range(small.width):
+            px = small.getpixel((x, y))
+            row += "S" if _is_selected(px) else "M" if _is_model(px) else "." if _is_background(px) else "o"
+        rows.append(row)
+    print(f"DIAG map {label}")
+    for r in rows:
+        print("DIAG |" + r + "|")
+    top = sorted(image.getcolors(maxcolors=image.width * image.height), reverse=True)[:8]
+    print(f"DIAG colours {label}", top)
+
+
 def _is_coloured(px) -> bool:  # a result colour map: clearly not grey
     return max(px) - min(px) > 70
 
@@ -386,6 +403,7 @@ async def test_commands_and_keys_reach_whichever_viewport_is_on_screen(ws_server
             image = await _pixels(page)
             assert _count(image, _is_selected) < 50, f"{backend}: the hidden box is still highlighted"
             hidden = _count(image, _is_model)
+            _diag_map(image, "after hide")
             await _command(page, "Show all")
             assert _count(await _pixels(page), _is_model) > hidden, f"{backend}: Show all brought nothing back"
 
@@ -473,6 +491,7 @@ async def test_undo_reaches_past_a_model_shown_again_on_the_three_free_viewport(
 
             await show()
             await _until(page, lambda: _model_on_screen(page), "the model to be drawn")
+            _diag_map(await _pixels(page), "first show")
             assert await page.evaluate("document.documentElement.dataset.nativeViewport") == "active"
             await _click(page, *CENTRE)
             assert _count(await _pixels(page), _is_selected) > 3000, "the click selected nothing"
@@ -493,6 +512,7 @@ async def test_undo_reaches_past_a_model_shown_again_on_the_three_free_viewport(
             except AssertionError:
                 # DEBUG ONLY (not for merge): what the page shows and says when the re-shown model never comes whole.
                 image = await _pixels(page)
+                _diag_map(image, "after re-show")
                 print(
                     "DIAG hidden-count",
                     hidden,

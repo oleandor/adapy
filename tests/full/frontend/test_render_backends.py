@@ -461,6 +461,9 @@ async def test_undo_reaches_past_a_model_shown_again_on_the_three_free_viewport(
     model that is on screen again: a step names a model by where it came from, not by one load of it."""
     async with async_playwright() as playwright:
         browser, page, _ = await _open_viewer(playwright, ws_server, NATIVE)
+        logs: list[str] = []
+        page.on("console", lambda m: logs.append(f"[{m.type}] {m.text}"[:400]))
+        page.on("pageerror", lambda e: logs.append(f"[pageerror] {e}"[:400]))
         try:
 
             async def show() -> None:
@@ -485,7 +488,25 @@ async def test_undo_reaches_past_a_model_shown_again_on_the_three_free_viewport(
             async def whole():
                 return _count(await _pixels(page), _is_model) > hidden
 
-            await _until(page, whole, "the model shown again to be drawn whole")
+            try:
+                await _until(page, whole, "the model shown again to be drawn whole")
+            except AssertionError:
+                # DEBUG ONLY (not for merge): what the page shows and says when the re-shown model never comes whole.
+                image = await _pixels(page)
+                print(
+                    "DIAG hidden-count",
+                    hidden,
+                    "model now",
+                    _count(image, _is_model),
+                    "selected now",
+                    _count(image, _is_selected),
+                    "background",
+                    _count(image, _is_background),
+                )
+                print("DIAG dataset", await page.evaluate("JSON.stringify(document.documentElement.dataset)"))
+                for line in logs[-120:]:
+                    print("DIAG console", line)
+                raise
             assert _count(await _pixels(page), _is_selected) < 50
 
             # undo the hide: the box of the model on screen now is selected, as it was before the hide
